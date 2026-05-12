@@ -16,6 +16,40 @@
 |---|---|---|
 | `openlistscan/` | OpenList 扫描触发器 | 一键触发 OpenList 扫描 + MP 目录整理，替代每次手动 curl |
 
+## 安装方式
+
+### 方式 A：通过 MP 第三方插件仓库（推荐）
+
+1. 在 GitHub 创建一个独立仓库（如 `yahoo2022/moviepilot-plugins`）
+2. 仓库结构如下：
+   ```
+   moviepilot-plugins/
+   └── plugins/
+       └── openlistscan/
+           ├── __init__.py
+           ├── requirements.txt
+           └── package.json
+   ```
+3. 把本目录下 `openlistscan/` 的内容推到那个仓库的 `plugins/openlistscan/` 下
+4. 在 MP 后台：「设定」→「系统」→ 找到「PLUGIN_MARKET」配置项
+5. 在已有的仓库地址后面加上你的仓库地址（逗号分隔）：
+   ```
+   https://github.com/jxxghp/MoviePilot-Plugins,https://github.com/yahoo2022/moviepilot-plugins
+   ```
+6. 重启 MP：`cd /opt && docker compose restart moviepilot`
+7. 在 MP 后台「插件」页面搜索"OpenList"即可安装
+
+### 方式 B：通过环境变量指定仓库
+
+在 `docker-compose.yml` 的 moviepilot 服务里加环境变量：
+
+```yaml
+environment:
+  - PLUGIN_MARKET=https://github.com/jxxghp/MoviePilot-Plugins,https://github.com/yahoo2022/moviepilot-plugins
+```
+
+然后 `cd /opt && docker compose up -d`。
+
 ## openlistscan 使用说明
 
 ### 功能
