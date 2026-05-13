@@ -48,7 +48,7 @@ class OpenListScan(_PluginBase):
     _enabled: bool = False
     _notify: bool = True
     _run_once: bool = False
-    _openlist_url: str = "http://192.168.1.111:5244"
+    _openlist_url: str = ""
     _openlist_token: str = ""
     _scan_path: str = "/115/云下载"
     _scan_limit: int = 2
@@ -339,7 +339,7 @@ class OpenListScan(_PluginBase):
                         "content": [
                             self._col(6, "VTextField", "openlist_url",
                                       "OpenList 地址",
-                                      placeholder="http://192.168.1.111:5244"),
+                                      placeholder="http://your-host:5244"),
                             self._col(6, "VTextField", "openlist_token",
                                       "OpenList Token",
                                       placeholder="openlist-xxxxxx"),
@@ -402,7 +402,7 @@ class OpenListScan(_PluginBase):
             "notify": True,
             "run_once": False,
             "trigger_mp_transfer": True,
-            "openlist_url": "http://192.168.1.111:5244",
+            "openlist_url": "",
             "openlist_token": "",
             "scan_path": "/115/云下载",
             "scan_limit": 2,
