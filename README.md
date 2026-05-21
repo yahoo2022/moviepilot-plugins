@@ -5,6 +5,7 @@
 | 插件目录 | 名称 | 说明 |
 |---|---|---|
 | `openlistscan/` | OpenList 扫描触发器 | 一键触发 OpenList 扫描 + MP 目录整理 |
+| `strmrename/` | STRM 剧集重命名助手 | 按上级目录名把纯数字 STRM 重命名为 SxxExx |
 
 ## 安装
 
@@ -20,5 +21,6 @@ https://github.com/jxxghp/MoviePilot-Plugins,https://github.com/yahoo2022/moviep
 
 ```bash
 cp -r openlistscan /path/to/MoviePilot/config/plugins/
+cp -r strmrename /path/to/MoviePilot/config/plugins/
 docker compose restart moviepilot
 ```

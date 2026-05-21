@@ -1,0 +1,10 @@
+{
+  "id": "StrmRename",
+  "name": "STRM 剧集重命名助手",
+  "description": "按上级目录名把纯数字 STRM 重命名为电视剧友好的 SxxExx 格式",
+  "version": "1.0.0",
+  "author": "ahnuchen",
+  "author_url": "https://github.com/yahoo2022",
+  "icon": "edit.png",
+  "level": 1
+}

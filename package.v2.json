@@ -10,5 +10,17 @@
     "history": {
       "v1.0.0": "初始版本：支持 Web UI / 远程命令 / Webhook / Cron 触发扫描与整理"
     }
+  },
+  "StrmRename": {
+    "name": "STRM 剧集重命名助手",
+    "description": "按上级目录名把纯数字 STRM 重命名为电视剧友好的 SxxExx 格式",
+    "labels": "工具",
+    "version": "1.0.0",
+    "icon": "edit.png",
+    "author": "ahnuchen",
+    "level": 1,
+    "history": {
+      "v1.0.0": "初始版本：支持预演、递归扫描、SxxExx 模板、远程命令/Webhook/Cron"
+    }
   }
 }
