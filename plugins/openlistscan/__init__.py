@@ -1,16 +1,21 @@
 """
 OpenList 扫描触发器 - MoviePilot V2 插件
 
-功能：在 MP Web 后台一键触发 OpenList 扫描 + MP 目录整理。
-场景：115 离线下载完成后，通过 MP 后台一键刷新 STRM 并整理入库，
-     避免每次手动 curl OpenList 扫描接口 + 再到 MP 点整理。
+功能：在 MP Web 后台一键触发 OpenList 目录刷新 + MP 目录整理。
+场景：115 离线下载完成后，通过 MP 后台一键生成新文件的 STRM 并整理入库，
+     避免每次手动在 OpenList 里逐层点开目录 + 再到 MP 点整理。
+
+原理：OpenList 的 Strm 驱动（SaveStrmToLocal + update 模式）是“懒生成”——
+     只有目录被列出（访问）时才把该层 .strm 落到本地。本插件用
+     /api/fs/list 递归遍历挂载路径，等价于把每个文件夹都自动点开一遍，
+     从而让所有新文件的 STRM 落地。比建索引快，也不需要索引权限。
 
 用法：
-  1. 在插件配置页填 OpenList 地址、token、要扫描的路径、MP 整理源目录/目标目录等
+  1. 在插件配置页填 OpenList 地址、token、扫描路径（挂载路径如 /云下载）、
+     MP 整理源目录等
   2. 开启"立即执行一次"开关后保存，插件会：
-     - 调 OpenList /api/admin/scan/start 触发递归扫描
-     - 轮询 /api/admin/scan/progress 等待扫描结束（带超时）
-     - 扫描完成后调用 MP 内部 TransferChain 对指定源目录做一次整理
+     - 用 /api/fs/list 递归遍历扫描路径下的所有目录（refresh=true 强制刷新）
+     - 遍历完成后调用 MP 内部 TransferChain 对指定源目录做一次整理
   3. 也支持 Cron 定时执行，或通过远程命令 /openlist_scan 触发
 """
 import time
@@ -37,7 +42,7 @@ class OpenListScan(_PluginBase):
     plugin_name = "OpenList 扫描触发器"
     plugin_desc = "一键触发 OpenList 目录扫描，并在扫描完成后自动执行 MP 目录整理"
     plugin_icon = "refresh2.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "ahnuchen"
     author_url = "https://github.com/ahnuchen"
     plugin_config_prefix = "openlistscan_"
@@ -50,9 +55,9 @@ class OpenListScan(_PluginBase):
     _run_once: bool = False
     _openlist_url: str = ""
     _openlist_token: str = ""
-    _scan_path: str = "/115/云下载"
-    _scan_limit: int = 2
-    _scan_timeout: int = 1800  # 秒
+    _scan_path: str = "/云下载"  # OpenList 挂载路径（虚拟路径），不是 115 源路径
+    _scan_limit: int = 2  # 递归并发/节流：每列一层目录后 sleep 的毫秒数基数
+    _scan_timeout: int = 1800  # 秒，整个递归遍历的总超时
     _trigger_mp_transfer: bool = True
     _mp_source_path: str = ""  # MP 内可见的源路径，如 /media/云下载
     _cron: str = ""
@@ -68,7 +73,7 @@ class OpenListScan(_PluginBase):
             self._run_once = config.get("run_once", False)
             self._openlist_url = (config.get("openlist_url") or "").rstrip("/")
             self._openlist_token = config.get("openlist_token", "")
-            self._scan_path = config.get("scan_path") or "/115/云下载"
+            self._scan_path = config.get("scan_path") or "/云下载"
             self._scan_limit = int(config.get("scan_limit") or 2)
             self._scan_timeout = int(config.get("scan_timeout") or 1800)
             self._trigger_mp_transfer = config.get("trigger_mp_transfer", True)
@@ -130,8 +135,8 @@ class OpenListScan(_PluginBase):
                 "endpoint": self._api_scan,
                 "methods": ["GET", "POST"],
                 "summary": "触发 OpenList 扫描并整理",
-                "description": "触发一次 OpenList /api/admin/scan/start，"
-                "等待扫描结束后调用 MP 目录整理。",
+                "description": "递归遍历 OpenList 挂载路径（/api/fs/list 触发 "
+                "Strm 懒生成），完成后调用 MP 目录整理。",
             }
         ]
 
@@ -175,86 +180,98 @@ class OpenListScan(_PluginBase):
     # ---------- 核心逻辑 ----------
 
     def _run_task(self):
-        """完整流程：OpenList 扫描 → 等待完成 → MP 目录整理"""
+        """完整流程：递归遍历 OpenList 目录（触发 STRM 懒生成）→ MP 目录整理"""
         if not self._openlist_url or not self._openlist_token:
             msg = "OpenList 地址或 token 未配置"
             logger.error(f"[{self.plugin_name}] {msg}")
             self._send_notify("配置错误", msg)
             return
 
-        # Step 1: 触发扫描
-        ok, msg = self._start_scan()
+        # Step 1 + 2: 递归列目录，每访问一层即触发该层 STRM 落地
+        ok, msg = self._recursive_scan()
         if not ok:
-            self._send_notify("扫描启动失败", msg)
+            self._send_notify("扫描失败", msg)
             return
 
-        # Step 2: 轮询进度
-        ok, msg = self._wait_scan_finish()
-        if not ok:
-            self._send_notify("扫描等待超时", msg)
-            # 失败也不阻止后续整理，让用户自己决定
-            return
-
-        self._send_notify("OpenList 扫描完成", f"路径: {self._scan_path}")
+        self._send_notify("OpenList 扫描完成", msg)
 
         # Step 3: 触发 MP 整理
         if self._trigger_mp_transfer and self._mp_source_path:
             self._trigger_transfer()
 
-    def _start_scan(self) -> Tuple[bool, str]:
-        """调用 OpenList 扫描接口"""
-        url = f"{self._openlist_url}/api/admin/scan/start"
+    def _recursive_scan(self) -> Tuple[bool, str]:
+        """
+        递归遍历 OpenList 挂载路径下的所有目录。
+
+        原理：Strm 驱动（SaveStrmToLocal + update 模式）是“懒生成”——
+        只有当某个目录被列出（访问）时，OpenList 才会把该层的 .strm 落到本地。
+        因此这里用 /api/fs/list 逐层 DFS，每列一层就相当于“点开了那个文件夹”，
+        遍历完成后所有层级的 STRM 就都生成好了。比建索引快，也不需要索引权限。
+        """
+        start = time.time()
+        dir_count = 0
+        file_count = 0
+        # 用栈做 DFS，初始为配置的扫描根路径
+        stack: List[str] = [self._scan_path]
+        # 每列一层之间的节流间隔（秒），scan_limit 越小越保守
+        throttle = max(0.0, float(self._scan_limit) * 0.1)
+
+        while stack:
+            if time.time() - start > self._scan_timeout:
+                return False, (f"遍历超过 {self._scan_timeout} 秒未完成，"
+                               f"已处理目录 {dir_count} 个")
+            cur = stack.pop()
+            ok, entries, err = self._list_dir(cur)
+            if not ok:
+                logger.warning(f"[{self.plugin_name}] 列目录失败 {cur}: {err}")
+                continue
+            dir_count += 1
+            for ent in entries:
+                name = ent.get("name")
+                if not name:
+                    continue
+                child = f"{cur.rstrip('/')}/{name}"
+                if ent.get("is_dir"):
+                    stack.append(child)
+                else:
+                    file_count += 1
+            if throttle:
+                time.sleep(throttle)
+
+        elapsed = int(time.time() - start)
+        msg = (f"路径: {self._scan_path}，已遍历目录 {dir_count} 个、"
+               f"文件 {file_count} 个，耗时 {elapsed} 秒")
+        logger.info(f"[{self.plugin_name}] 递归扫描完成，{msg}")
+        return True, msg
+
+    def _list_dir(self, path: str) -> Tuple[bool, List[dict], str]:
+        """
+        调 OpenList /api/fs/list 列出一层目录。
+        refresh=true 强制跳过缓存、重新拉取，从而触发该层 STRM 落地。
+        返回 (是否成功, 目录项列表, 错误信息)。
+        """
+        url = f"{self._openlist_url}/api/fs/list"
         headers = {
             "Authorization": self._openlist_token,
             "Content-Type": "application/json",
         }
-        payload = {"path": self._scan_path, "limit": self._scan_limit}
+        payload = {
+            "path": path,
+            "page": 1,
+            "per_page": 0,   # 0 = 不分页，返回全部
+            "refresh": True,  # 强制刷新，触发 Strm 懒生成
+        }
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=10)
+            resp = requests.post(url, headers=headers, json=payload, timeout=30)
             resp.raise_for_status()
-            data = resp.json()
+            data = resp.json() or {}
             code = data.get("code")
-            if code and code != 200:
-                return False, f"OpenList 返回错误: {data}"
-            logger.info(
-                f"[{self.plugin_name}] 扫描已启动，path={self._scan_path}, "
-                f"limit={self._scan_limit}"
-            )
-            return True, "已启动"
+            if code != 200:
+                return False, [], f"OpenList 返回 {code}: {data.get('message')}"
+            content = (data.get("data") or {}).get("content") or []
+            return True, content, ""
         except Exception as e:
-            logger.error(f"[{self.plugin_name}] 启动扫描失败: {e}")
-            return False, str(e)
-
-    def _wait_scan_finish(self) -> Tuple[bool, str]:
-        """轮询 /api/admin/scan/progress 直到扫描结束或超时"""
-        url = f"{self._openlist_url}/api/admin/scan/progress"
-        headers = {"Authorization": self._openlist_token}
-        start = time.time()
-        while time.time() - start < self._scan_timeout:
-            try:
-                resp = requests.get(url, headers=headers, timeout=10)
-                resp.raise_for_status()
-                data = resp.json() or {}
-                payload = data.get("data") or {}
-                # OpenList 不同版本字段不同，这里做兼容判断：
-                # 常见字段：is_running / running / finished / progress 等
-                running = (
-                    payload.get("is_running")
-                    or payload.get("running")
-                    or payload.get("is_scanning")
-                )
-                if running is False:
-                    logger.info(f"[{self.plugin_name}] 扫描结束，耗时 "
-                                f"{int(time.time() - start)} 秒")
-                    return True, "扫描完成"
-                # 兜底：如果 payload 为空或没有任务字段，也认为结束
-                if not payload:
-                    logger.info(f"[{self.plugin_name}] 扫描进度接口返回空，视为结束")
-                    return True, "扫描完成（进度接口空响应）"
-            except Exception as e:
-                logger.warning(f"[{self.plugin_name}] 查询扫描进度失败: {e}")
-            time.sleep(5)
-        return False, f"超过 {self._scan_timeout} 秒仍未结束"
+            return False, [], str(e)
 
     def _trigger_transfer(self):
         """调用 MP TransferChain 对指定目录执行整理"""
@@ -350,10 +367,10 @@ class OpenListScan(_PluginBase):
                         "component": "VRow",
                         "content": [
                             self._col(6, "VTextField", "scan_path",
-                                      "扫描路径",
-                                      placeholder="/115/云下载"),
+                                      "扫描路径 (OpenList 挂载路径)",
+                                      placeholder="/云下载"),
                             self._col(3, "VTextField", "scan_limit",
-                                      "扫描速率 limit",
+                                      "节流强度 (越大越慢越稳)",
                                       placeholder="2"),
                             self._col(3, "VTextField", "scan_timeout",
                                       "超时秒数",
@@ -385,9 +402,12 @@ class OpenListScan(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": "流程：触发 OpenList 扫描 → "
-                                            "轮询进度直到结束 → 调 MP 整理源目录。"
-                                            "Cron 填了会按周期执行。"
+                                            "text": "流程：递归遍历 OpenList 挂载路径"
+                                            "（逐层列目录，触发 Strm 懒生成）→ "
+                                            "调 MP 整理源目录。"
+                                            "扫描路径请填 OpenList 的挂载路径"
+                                            "（如 /云下载），不是 115 源路径。"
+                                            "Cron 填了会按周期执行，"
                                             "也可以通过远程命令 /openlist_scan 触发。",
                                         },
                                     }
@@ -404,7 +424,7 @@ class OpenListScan(_PluginBase):
             "trigger_mp_transfer": True,
             "openlist_url": "",
             "openlist_token": "",
-            "scan_path": "/115/云下载",
+            "scan_path": "/云下载",
             "scan_limit": 2,
             "scan_timeout": 1800,
             "mp_source_path": "/media/云下载",
