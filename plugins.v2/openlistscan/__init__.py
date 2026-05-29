@@ -42,7 +42,7 @@ class OpenListScan(_PluginBase):
     plugin_name = "OpenList 扫描触发器"
     plugin_desc = "一键触发 OpenList 目录扫描，并在扫描完成后自动执行 MP 目录整理"
     plugin_icon = "refresh2.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "ahnuchen"
     author_url = "https://github.com/ahnuchen"
     plugin_config_prefix = "openlistscan_"
@@ -58,6 +58,7 @@ class OpenListScan(_PluginBase):
     _scan_path: str = "/云下载"  # OpenList 挂载路径（虚拟路径），不是 115 源路径
     _scan_limit: int = 2  # 递归并发/节流：每列一层目录后 sleep 的毫秒数基数
     _scan_timeout: int = 1800  # 秒，整个递归遍历的总超时
+    _recent_days: int = 0  # 增量天数：只扫 modified 在最近 N 天内的目录；0=全量
     _trigger_mp_transfer: bool = True
     _mp_source_path: str = ""  # MP 内可见的源路径，如 /media/云下载
     _cron: str = ""
@@ -76,6 +77,7 @@ class OpenListScan(_PluginBase):
             self._scan_path = config.get("scan_path") or "/云下载"
             self._scan_limit = int(config.get("scan_limit") or 2)
             self._scan_timeout = int(config.get("scan_timeout") or 1800)
+            self._recent_days = int(config.get("recent_days") or 0)
             self._trigger_mp_transfer = config.get("trigger_mp_transfer", True)
             self._mp_source_path = config.get("mp_source_path", "")
             self._cron = config.get("cron", "")
@@ -106,6 +108,7 @@ class OpenListScan(_PluginBase):
             "scan_path": self._scan_path,
             "scan_limit": self._scan_limit,
             "scan_timeout": self._scan_timeout,
+            "recent_days": self._recent_days,
             "trigger_mp_transfer": self._trigger_mp_transfer,
             "mp_source_path": self._mp_source_path,
             "cron": self._cron,
@@ -207,11 +210,20 @@ class OpenListScan(_PluginBase):
         只有当某个目录被列出（访问）时，OpenList 才会把该层的 .strm 落到本地。
         因此这里用 /api/fs/list 逐层 DFS，每列一层就相当于“点开了那个文件夹”，
         遍历完成后所有层级的 STRM 就都生成好了。比建索引快，也不需要索引权限。
+
+        增量：若配置了 recent_days > 0，则只钻进 modified 时间在最近 N 天内的
+        子目录，跳过更早的，从而只扫新增内容、不必每次全量遍历。
+        前提：新内容所在目录的 mtime 是最近的（115 离线下载落到目标目录时成立）。
         """
         start = time.time()
         dir_count = 0
         file_count = 0
-        # 用栈做 DFS，初始为配置的扫描根路径
+        skipped = 0
+        # 增量截止时间：modified 早于它的子目录直接跳过；None 表示全量
+        cutoff = None
+        if self._recent_days and self._recent_days > 0:
+            cutoff = datetime.now(tz=pytz.utc) - timedelta(days=self._recent_days)
+        # 用栈做 DFS，初始为配置的扫描根路径；根永远扫描，不受时间过滤影响
         stack: List[str] = [self._scan_path]
         # 每列一层之间的节流间隔（秒），scan_limit 越小越保守
         throttle = max(0.0, float(self._scan_limit) * 0.1)
@@ -232,6 +244,12 @@ class OpenListScan(_PluginBase):
                     continue
                 child = f"{cur.rstrip('/')}/{name}"
                 if ent.get("is_dir"):
+                    # 增量剪枝：旧目录跳过
+                    if cutoff is not None:
+                        mtime = self._parse_time(ent.get("modified"))
+                        if mtime is not None and mtime < cutoff:
+                            skipped += 1
+                            continue
                     stack.append(child)
                 else:
                     file_count += 1
@@ -239,10 +257,26 @@ class OpenListScan(_PluginBase):
                 time.sleep(throttle)
 
         elapsed = int(time.time() - start)
-        msg = (f"路径: {self._scan_path}，已遍历目录 {dir_count} 个、"
-               f"文件 {file_count} 个，耗时 {elapsed} 秒")
+        extra = f"，跳过旧目录 {skipped} 个" if cutoff is not None else ""
+        mode = f"增量({self._recent_days}天)" if cutoff is not None else "全量"
+        msg = (f"路径: {self._scan_path}（{mode}），已遍历目录 {dir_count} 个、"
+               f"文件 {file_count} 个{extra}，耗时 {elapsed} 秒")
         logger.info(f"[{self.plugin_name}] 递归扫描完成，{msg}")
         return True, msg
+
+    @staticmethod
+    def _parse_time(s: Optional[str]) -> Optional[datetime]:
+        """解析 OpenList 返回的 modified 时间（ISO8601），统一为 UTC 时区。"""
+        if not s:
+            return None
+        try:
+            txt = s.strip().replace("Z", "+00:00")
+            dt = datetime.fromisoformat(txt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=pytz.utc)
+            return dt.astimezone(pytz.utc)
+        except Exception:
+            return None
 
     def _list_dir(self, path: str) -> Tuple[bool, List[dict], str]:
         """
@@ -369,10 +403,13 @@ class OpenListScan(_PluginBase):
                             self._col(6, "VTextField", "scan_path",
                                       "扫描路径 (OpenList 挂载路径)",
                                       placeholder="/云下载"),
-                            self._col(3, "VTextField", "scan_limit",
-                                      "节流强度 (越大越慢越稳)",
+                            self._col(2, "VTextField", "scan_limit",
+                                      "节流强度",
                                       placeholder="2"),
-                            self._col(3, "VTextField", "scan_timeout",
+                            self._col(2, "VTextField", "recent_days",
+                                      "增量天数 (0=全量)",
+                                      placeholder="0"),
+                            self._col(2, "VTextField", "scan_timeout",
                                       "超时秒数",
                                       placeholder="1800"),
                         ],
@@ -407,6 +444,8 @@ class OpenListScan(_PluginBase):
                                             "调 MP 整理源目录。"
                                             "扫描路径请填 OpenList 的挂载路径"
                                             "（如 /云下载），不是 115 源路径。"
+                                            "增量天数=0 时全量遍历；填 N 则只钻进"
+                                            "最近 N 天有改动的目录，适合只扫新增。"
                                             "Cron 填了会按周期执行，"
                                             "也可以通过远程命令 /openlist_scan 触发。",
                                         },
@@ -427,6 +466,7 @@ class OpenListScan(_PluginBase):
             "scan_path": "/云下载",
             "scan_limit": 2,
             "scan_timeout": 1800,
+            "recent_days": 0,
             "mp_source_path": "/media/云下载",
             "cron": "",
         }

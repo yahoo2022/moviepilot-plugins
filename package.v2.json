@@ -3,11 +3,12 @@
     "name": "OpenList 扫描触发器",
     "description": "一键触发 OpenList 目录扫描，并在扫描完成后自动执行 MP 目录整理",
     "labels": "工具",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "icon": "refresh2.png",
     "author": "ahnuchen",
     "level": 1,
     "history": {
+      "v1.2.0": "支持增量扫描：按目录 modified 时间只钻进最近 N 天有改动的目录，避免每次全量遍历",
       "v1.1.0": "修正扫描机制：改用 /api/fs/list 递归遍历挂载路径触发 Strm 懒生成（原 /api/admin/scan 接口在 OpenList 不存在）",
       "v1.0.0": "初始版本：支持 Web UI / 远程命令 / Webhook / Cron 触发扫描与整理"
     }
