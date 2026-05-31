@@ -42,9 +42,9 @@ class OpenListScan(_PluginBase):
     plugin_name = "OpenList 扫描触发器"
     plugin_desc = "一键触发 OpenList 目录扫描，并在扫描完成后自动执行 MP 目录整理"
     plugin_icon = "refresh2.png"
-    plugin_version = "1.2.0"
-    plugin_author = "ahnuchen"
-    author_url = "https://github.com/ahnuchen"
+    plugin_version = "1.3.0"
+    plugin_author = "yahoo2022"
+    author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "openlistscan_"
     plugin_order = 20
     auth_level = 1
@@ -55,12 +55,16 @@ class OpenListScan(_PluginBase):
     _run_once: bool = False
     _openlist_url: str = ""
     _openlist_token: str = ""
-    _scan_path: str = "/云下载"  # OpenList 挂载路径（虚拟路径），不是 115 源路径
+    # 扫描路径：OpenList 挂载路径（虚拟路径），不是 115 源路径。
+    # 支持多个，用换行或逗号分隔，如 "/云下载\n/TV"
+    _scan_path: str = "/云下载"
     _scan_limit: int = 2  # 递归并发/节流：每列一层目录后 sleep 的毫秒数基数
     _scan_timeout: int = 1800  # 秒，整个递归遍历的总超时
     _recent_days: int = 0  # 增量天数：只扫 modified 在最近 N 天内的目录；0=全量
     _trigger_mp_transfer: bool = True
-    _mp_source_path: str = ""  # MP 内可见的源路径，如 /media/云下载
+    # MP 整理源目录：MP 容器内可见路径，如 /media/云下载。
+    # 支持多个，用换行或逗号分隔
+    _mp_source_path: str = ""
     _cron: str = ""
     _scheduler: Optional[BackgroundScheduler] = None
 
@@ -182,29 +186,58 @@ class OpenListScan(_PluginBase):
 
     # ---------- 核心逻辑 ----------
 
+    @staticmethod
+    def _split_paths(raw: str) -> List[str]:
+        """把多行/逗号分隔的路径串拆成列表，去空白、去重、保序。"""
+        if not raw:
+            return []
+        parts: List[str] = []
+        for line in raw.replace(",", "\n").replace("，", "\n").splitlines():
+            p = line.strip()
+            if p and p not in parts:
+                parts.append(p)
+        return parts
+
     def _run_task(self):
-        """完整流程：递归遍历 OpenList 目录（触发 STRM 懒生成）→ MP 目录整理"""
+        """完整流程：逐个扫描路径递归遍历（触发 STRM 懒生成）→ MP 目录整理"""
         if not self._openlist_url or not self._openlist_token:
             msg = "OpenList 地址或 token 未配置"
             logger.error(f"[{self.plugin_name}] {msg}")
             self._send_notify("配置错误", msg)
             return
 
-        # Step 1 + 2: 递归列目录，每访问一层即触发该层 STRM 落地
-        ok, msg = self._recursive_scan()
-        if not ok:
-            self._send_notify("扫描失败", msg)
+        scan_paths = self._split_paths(self._scan_path)
+        if not scan_paths:
+            msg = "扫描路径未配置"
+            logger.error(f"[{self.plugin_name}] {msg}")
+            self._send_notify("配置错误", msg)
             return
 
-        self._send_notify("OpenList 扫描完成", msg)
+        # Step 1 + 2: 对每个扫描路径递归列目录，每访问一层即触发该层 STRM 落地
+        results: List[str] = []
+        any_ok = False
+        for sp in scan_paths:
+            ok, msg = self._recursive_scan(sp)
+            if ok:
+                any_ok = True
+                results.append(f"✓ {msg}")
+            else:
+                results.append(f"✗ {sp}: {msg}")
+        summary = "\n".join(results)
+        logger.info(f"[{self.plugin_name}] 全部扫描结束：\n{summary}")
 
-        # Step 3: 触发 MP 整理
-        if self._trigger_mp_transfer and self._mp_source_path:
+        if not any_ok:
+            self._send_notify("扫描失败", summary)
+            return
+        self._send_notify("OpenList 扫描完成", summary)
+
+        # Step 3: 触发 MP 整理（可能多个源目录）
+        if self._trigger_mp_transfer:
             self._trigger_transfer()
 
-    def _recursive_scan(self) -> Tuple[bool, str]:
+    def _recursive_scan(self, scan_path: str) -> Tuple[bool, str]:
         """
-        递归遍历 OpenList 挂载路径下的所有目录。
+        递归遍历单个 OpenList 挂载路径下的所有目录。
 
         原理：Strm 驱动（SaveStrmToLocal + update 模式）是“懒生成”——
         只有当某个目录被列出（访问）时，OpenList 才会把该层的 .strm 落到本地。
@@ -223,8 +256,8 @@ class OpenListScan(_PluginBase):
         cutoff = None
         if self._recent_days and self._recent_days > 0:
             cutoff = datetime.now(tz=pytz.utc) - timedelta(days=self._recent_days)
-        # 用栈做 DFS，初始为配置的扫描根路径；根永远扫描，不受时间过滤影响
-        stack: List[str] = [self._scan_path]
+        # 用栈做 DFS，初始为该扫描根路径；根永远扫描，不受时间过滤影响
+        stack: List[str] = [scan_path]
         # 每列一层之间的节流间隔（秒），scan_limit 越小越保守
         throttle = max(0.0, float(self._scan_limit) * 0.1)
 
@@ -259,7 +292,7 @@ class OpenListScan(_PluginBase):
         elapsed = int(time.time() - start)
         extra = f"，跳过旧目录 {skipped} 个" if cutoff is not None else ""
         mode = f"增量({self._recent_days}天)" if cutoff is not None else "全量"
-        msg = (f"路径: {self._scan_path}（{mode}），已遍历目录 {dir_count} 个、"
+        msg = (f"路径: {scan_path}（{mode}），已遍历目录 {dir_count} 个、"
                f"文件 {file_count} 个{extra}，耗时 {elapsed} 秒")
         logger.info(f"[{self.plugin_name}] 递归扫描完成，{msg}")
         return True, msg
@@ -308,50 +341,67 @@ class OpenListScan(_PluginBase):
             return False, [], str(e)
 
     def _trigger_transfer(self):
-        """调用 MP TransferChain 对指定目录执行整理"""
+        """调用 MP TransferChain 对一个或多个源目录执行整理"""
+        src_paths = self._split_paths(self._mp_source_path)
+        if not src_paths:
+            logger.info(f"[{self.plugin_name}] 未配置 MP 整理源目录，跳过整理")
+            return
+
         try:
             from app.chain.transfer import TransferChain
-            from app.chain.storage import StorageChain
             from app.schemas import FileItem
         except Exception as e:
             logger.error(f"[{self.plugin_name}] 导入 MP 内部模块失败: {e}")
             self._send_notify("MP 整理失败", f"导入模块异常: {e}")
             return
 
-        src = Path(self._mp_source_path)
-        if not src.exists():
-            msg = f"源路径不存在: {self._mp_source_path}"
-            logger.error(f"[{self.plugin_name}] {msg}")
-            self._send_notify("MP 整理失败", msg)
-            return
+        chain = TransferChain()
+        ok_list: List[str] = []
+        fail_list: List[str] = []
 
-        try:
-            # 构造 FileItem
-            fileitem = FileItem(
-                storage="local",
-                type="dir",
-                path=str(src),
-                name=src.name,
-                basename=src.name,
-                extension="",
-                size=0,
-            )
-            # 调 MP 的手动整理接口
-            chain = TransferChain()
-            logger.info(f"[{self.plugin_name}] 触发 MP 整理: {src}")
-            ok, msg = chain.manual_transfer(
-                fileitem=fileitem,
-                background=True,  # 后台执行，不阻塞
-            )
-            if ok:
-                logger.info(f"[{self.plugin_name}] MP 整理已提交: {msg}")
-                self._send_notify("MP 整理已提交", f"目录: {self._mp_source_path}")
-            else:
-                logger.error(f"[{self.plugin_name}] MP 整理提交失败: {msg}")
-                self._send_notify("MP 整理失败", str(msg))
-        except Exception as e:
-            logger.error(f"[{self.plugin_name}] 调 MP 整理异常: {e}")
-            self._send_notify("MP 整理异常", str(e))
+        for sp in src_paths:
+            src = Path(sp)
+            if not src.exists():
+                msg = f"源路径不存在: {sp}"
+                logger.error(f"[{self.plugin_name}] {msg}")
+                fail_list.append(msg)
+                continue
+            try:
+                fileitem = FileItem(
+                    storage="local",
+                    type="dir",
+                    path=str(src),
+                    name=src.name,
+                    basename=src.name,
+                    extension="",
+                    size=0,
+                )
+                logger.info(f"[{self.plugin_name}] 触发 MP 整理: {src}")
+                ok, msg = chain.manual_transfer(
+                    fileitem=fileitem,
+                    background=True,  # 后台执行，不阻塞
+                )
+                if ok:
+                    logger.info(f"[{self.plugin_name}] MP 整理已提交: {sp}")
+                    ok_list.append(sp)
+                else:
+                    logger.error(f"[{self.plugin_name}] MP 整理提交失败 {sp}: {msg}")
+                    fail_list.append(f"{sp}: {msg}")
+            except Exception as e:
+                logger.error(f"[{self.plugin_name}] 调 MP 整理异常 {sp}: {e}")
+                fail_list.append(f"{sp}: {e}")
+
+        # 汇总通知
+        parts = []
+        if ok_list:
+            parts.append("已提交:\n" + "\n".join(ok_list))
+        if fail_list:
+            parts.append("失败:\n" + "\n".join(fail_list))
+        text = "\n".join(parts) if parts else "无可整理目录"
+        title = "MP 整理已提交" if ok_list and not fail_list else "MP 整理完成（含失败）"
+        if not ok_list and fail_list:
+            title = "MP 整理失败"
+        self._send_notify(title, text)
 
     def _send_notify(self, title: str, text: str):
         if not self._notify:
@@ -400,9 +450,10 @@ class OpenListScan(_PluginBase):
                     {
                         "component": "VRow",
                         "content": [
-                            self._col(6, "VTextField", "scan_path",
-                                      "扫描路径 (OpenList 挂载路径)",
-                                      placeholder="/云下载"),
+                            self._col(6, "VTextarea", "scan_path",
+                                      "扫描路径 (挂载路径，多个换行)",
+                                      placeholder="/云下载\n/TV",
+                                      rows=2, autoGrow=True),
                             self._col(2, "VTextField", "scan_limit",
                                       "节流强度",
                                       placeholder="2"),
@@ -418,9 +469,10 @@ class OpenListScan(_PluginBase):
                     {
                         "component": "VRow",
                         "content": [
-                            self._col(8, "VTextField", "mp_source_path",
-                                      "MP 整理源目录 (MP 容器内可见)",
-                                      placeholder="/media/云下载"),
+                            self._col(8, "VTextarea", "mp_source_path",
+                                      "MP 整理源目录 (容器内路径，多个换行)",
+                                      placeholder="/media/云下载\n/media/TV",
+                                      rows=2, autoGrow=True),
                             self._col(4, "VTextField", "cron",
                                       "Cron 定时 (可选)",
                                       placeholder="0 */2 * * *"),
@@ -442,8 +494,10 @@ class OpenListScan(_PluginBase):
                                             "text": "流程：递归遍历 OpenList 挂载路径"
                                             "（逐层列目录，触发 Strm 懒生成）→ "
                                             "调 MP 整理源目录。"
-                                            "扫描路径请填 OpenList 的挂载路径"
-                                            "（如 /云下载），不是 115 源路径。"
+                                            "扫描路径/整理源目录都支持多个，"
+                                            "一行一个（如 /云下载 和 /TV）。"
+                                            "扫描路径填 OpenList 挂载路径，"
+                                            "不是 115 源路径。"
                                             "增量天数=0 时全量遍历；填 N 则只钻进"
                                             "最近 N 天有改动的目录，适合只扫新增。"
                                             "Cron 填了会按周期执行，"
