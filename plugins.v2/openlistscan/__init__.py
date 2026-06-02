@@ -42,7 +42,7 @@ class OpenListScan(_PluginBase):
     plugin_name = "OpenList 扫描触发器"
     plugin_desc = "一键触发 OpenList 目录扫描，并在扫描完成后自动执行 MP 目录整理"
     plugin_icon = "refresh2.png"
-    plugin_version = "1.3.0"
+    plugin_version = "1.4.0"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "openlistscan_"
@@ -57,8 +57,8 @@ class OpenListScan(_PluginBase):
     _openlist_token: str = ""
     # 扫描路径：OpenList 挂载路径（虚拟路径），不是 115 源路径。
     # 支持多个，用换行或逗号分隔，如 "/云下载\n/TV"
-    _scan_path: str = "/云下载"
-    _scan_limit: int = 2  # 递归并发/节流：每列一层目录后 sleep 的毫秒数基数
+    _scan_path: str = ""
+    _scan_limit: int = 20  # 节流：每列一层目录后 sleep 的秒数 = scan_limit * 0.1，值越大越慢
     _scan_timeout: int = 1800  # 秒，整个递归遍历的总超时
     _recent_days: int = 0  # 增量天数：只扫 modified 在最近 N 天内的目录；0=全量
     _trigger_mp_transfer: bool = True
@@ -78,8 +78,8 @@ class OpenListScan(_PluginBase):
             self._run_once = config.get("run_once", False)
             self._openlist_url = (config.get("openlist_url") or "").rstrip("/")
             self._openlist_token = config.get("openlist_token", "")
-            self._scan_path = config.get("scan_path") or "/云下载"
-            self._scan_limit = int(config.get("scan_limit") or 2)
+            self._scan_path = config.get("scan_path") or ""
+            self._scan_limit = int(config.get("scan_limit") or 20)
             self._scan_timeout = int(config.get("scan_timeout") or 1800)
             self._recent_days = int(config.get("recent_days") or 0)
             self._trigger_mp_transfer = config.get("trigger_mp_transfer", True)
@@ -258,7 +258,7 @@ class OpenListScan(_PluginBase):
             cutoff = datetime.now(tz=pytz.utc) - timedelta(days=self._recent_days)
         # 用栈做 DFS，初始为该扫描根路径；根永远扫描，不受时间过滤影响
         stack: List[str] = [scan_path]
-        # 每列一层之间的节流间隔（秒），scan_limit 越小越保守
+        # 每列一层之间的节流间隔（秒），scan_limit 越大越保守
         throttle = max(0.0, float(self._scan_limit) * 0.1)
 
         while stack:
@@ -455,14 +455,37 @@ class OpenListScan(_PluginBase):
                                       placeholder="/云下载\n/TV",
                                       rows=2, autoGrow=True),
                             self._col(2, "VTextField", "scan_limit",
-                                      "节流强度",
-                                      placeholder="2"),
+                                      "节流强度 (越大越慢)",
+                                      placeholder="20"),
                             self._col(2, "VTextField", "recent_days",
                                       "增量天数 (0=全量)",
                                       placeholder="0"),
                             self._col(2, "VTextField", "scan_timeout",
                                       "超时秒数",
                                       placeholder="1800"),
+                        ],
+                    },
+                    # 节流强度说明
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VAlert",
+                                        "props": {
+                                            "type": "warning",
+                                            "variant": "tonal",
+                                            "text": "节流强度：每次列目录后的等待秒数 = 节流强度 × 0.1。"
+                                            "例如：强度 10 = 1.0秒/次（约1次请求/秒），"
+                                            "强度 20 = 2.0秒/次（约0.5次请求/秒）。"
+                                            "若网盘触发风控，请增大此值。",
+                                        },
+                                    }
+                                ],
+                            }
                         ],
                     },
                     # MP 整理参数
@@ -517,8 +540,8 @@ class OpenListScan(_PluginBase):
             "trigger_mp_transfer": True,
             "openlist_url": "",
             "openlist_token": "",
-            "scan_path": "/云下载",
-            "scan_limit": 2,
+            "scan_path": "",
+            "scan_limit": 20,
             "scan_timeout": 1800,
             "recent_days": 0,
             "mp_source_path": "/media/云下载",
