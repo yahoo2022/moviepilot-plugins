@@ -271,6 +271,7 @@ class OpenListScan(_PluginBase):
                 logger.warning(f"[{self.plugin_name}] 列目录失败 {cur}: {err}")
                 continue
             dir_count += 1
+            sub_dirs = 0
             for ent in entries:
                 name = ent.get("name")
                 if not name:
@@ -283,9 +284,12 @@ class OpenListScan(_PluginBase):
                         if mtime is not None and mtime < cutoff:
                             skipped += 1
                             continue
+                    sub_dirs += 1
                     stack.append(child)
                 else:
                     file_count += 1
+            logger.info(f"[{self.plugin_name}] [{dir_count}] 列目录 {cur}"
+                        f"：子目录 {sub_dirs} 个，待扫 {len(stack)} 个")
             if throttle:
                 time.sleep(throttle)
 
