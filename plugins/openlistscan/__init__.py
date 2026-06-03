@@ -42,7 +42,7 @@ class OpenListScan(_PluginBase):
     plugin_name = "OpenList 扫描触发器"
     plugin_desc = "一键触发 OpenList 目录扫描，并在扫描完成后自动执行 MP 目录整理"
     plugin_icon = "refresh2.png"
-    plugin_version = "1.3.0"
+    plugin_version = "1.5.0"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "openlistscan_"
