@@ -7,7 +7,7 @@
 | `plugins.v2/openlistscan/` | OpenList 扫描触发器 | 一键触发 OpenList 扫描 + MP 目录整理 |
 | `plugins.v2/strmrename/` | STRM 剧集重命名助手 | 按上级目录名把纯数字 STRM 重命名为 SxxExx |
 
-> `plugins/` 是 MoviePilot V1 的副本,实际生效的是 `plugins.v2/`(MP V2)。
+> 仓库只面向 MoviePilot V2：索引为 `package.v2.json`，代码在 `plugins.v2/`。
 
 ## 安装
 
