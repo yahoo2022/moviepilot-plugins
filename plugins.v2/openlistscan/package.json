@@ -2,7 +2,7 @@
   "id": "OpenListScan",
   "name": "OpenList 扫描触发器",
   "description": "一键触发 OpenList 目录扫描，并在扫描完成后自动执行 MP 目录整理",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "author": "yahoo2022",
   "author_url": "https://github.com/yahoo2022",
   "icon": "refresh2.png",

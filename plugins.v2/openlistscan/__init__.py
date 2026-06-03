@@ -42,7 +42,7 @@ class OpenListScan(_PluginBase):
     plugin_name = "OpenList 扫描触发器"
     plugin_desc = "一键触发 OpenList 目录扫描，并在扫描完成后自动执行 MP 目录整理"
     plugin_icon = "refresh2.png"
-    plugin_version = "1.5.0"
+    plugin_version = "1.6.0"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "openlistscan_"
@@ -59,7 +59,7 @@ class OpenListScan(_PluginBase):
     # 支持多个，用换行或逗号分隔，如 "/云下载\n/TV"
     _scan_path: str = ""
     _scan_limit: int = 20  # 节流：每列一层目录后 sleep 的秒数 = scan_limit * 0.1，值越大越慢
-    _scan_timeout: int = 1800  # 秒，整个递归遍历的总超时
+    _scan_timeout: int = 0  # 秒，整个递归遍历的总超时；0=不限时（推荐，避免大目录被截断）
     _recent_days: int = 0  # 增量天数：只扫 modified 在最近 N 天内的目录；0=全量
     _trigger_mp_transfer: bool = True
     # MP 整理源目录：MP 容器内可见路径，如 /media/云下载。
@@ -80,7 +80,9 @@ class OpenListScan(_PluginBase):
             self._openlist_token = config.get("openlist_token", "")
             self._scan_path = config.get("scan_path") or ""
             self._scan_limit = int(config.get("scan_limit") or 20)
-            self._scan_timeout = int(config.get("scan_timeout") or 1800)
+            # 用显式 None 判断，避免用户填 0（不限时）被 `or` 当成假值替换掉
+            _to = config.get("scan_timeout")
+            self._scan_timeout = int(_to) if str(_to).strip() not in ("", "None") else 0
             self._recent_days = int(config.get("recent_days") or 0)
             self._trigger_mp_transfer = config.get("trigger_mp_transfer", True)
             self._mp_source_path = config.get("mp_source_path", "")
@@ -252,6 +254,7 @@ class OpenListScan(_PluginBase):
         dir_count = 0
         file_count = 0
         skipped = 0
+        failed: List[str] = []  # 重试后仍失败的目录（其子树可能漏扫）
         # 增量截止时间：modified 早于它的子目录直接跳过；None 表示全量
         cutoff = None
         if self._recent_days and self._recent_days > 0:
@@ -260,15 +263,20 @@ class OpenListScan(_PluginBase):
         stack: List[str] = [scan_path]
         # 每列一层之间的节流间隔（秒），scan_limit 越大越保守
         throttle = max(0.0, float(self._scan_limit) * 0.1)
+        # 超时：0 表示不限时
+        no_timeout = self._scan_timeout <= 0
 
+        timed_out = False
         while stack:
-            if time.time() - start > self._scan_timeout:
-                return False, (f"遍历超过 {self._scan_timeout} 秒未完成，"
-                               f"已处理目录 {dir_count} 个")
+            if not no_timeout and time.time() - start > self._scan_timeout:
+                timed_out = True
+                break
             cur = stack.pop()
             ok, entries, err = self._list_dir(cur)
             if not ok:
-                logger.warning(f"[{self.plugin_name}] 列目录失败 {cur}: {err}")
+                # 重试后仍失败：记录下来，其子树可能漏扫，最终汇报，绝不静默
+                logger.warning(f"[{self.plugin_name}] 列目录失败（已重试）{cur}: {err}")
+                failed.append(cur)
                 continue
             dir_count += 1
             sub_dirs = 0
@@ -296,6 +304,24 @@ class OpenListScan(_PluginBase):
         elapsed = int(time.time() - start)
         extra = f"，跳过旧目录 {skipped} 个" if cutoff is not None else ""
         mode = f"增量({self._recent_days}天)" if cutoff is not None else "全量"
+
+        # 判定是否完整：超时 or 有失败目录 都算不完整
+        if timed_out:
+            remain = len(stack)
+            msg = (f"路径: {scan_path}（{mode}）扫描中断：超过 {self._scan_timeout} 秒，"
+                   f"已遍历目录 {dir_count} 个、文件 {file_count} 个{extra}，"
+                   f"还剩 {remain} 个目录未扫。建议调大「超时秒数」或设为 0（不限时），"
+                   f"或调小「节流强度」加快速度。")
+            logger.warning(f"[{self.plugin_name}] {msg}")
+            return False, msg
+        if failed:
+            msg = (f"路径: {scan_path}（{mode}）扫描完成但有遗漏：已遍历目录 "
+                   f"{dir_count} 个、文件 {file_count} 个{extra}，"
+                   f"{len(failed)} 个目录列举失败（其子目录可能未生成 STRM），"
+                   f"耗时 {elapsed} 秒。失败示例：{failed[0]}")
+            logger.warning(f"[{self.plugin_name}] {msg}")
+            return False, msg
+
         msg = (f"路径: {scan_path}（{mode}），已遍历目录 {dir_count} 个、"
                f"文件 {file_count} 个{extra}，耗时 {elapsed} 秒")
         logger.info(f"[{self.plugin_name}] 递归扫描完成，{msg}")
@@ -319,6 +345,8 @@ class OpenListScan(_PluginBase):
         """
         调 OpenList /api/fs/list 列出一层目录。
         refresh=true 强制跳过缓存、重新拉取，从而触发该层 STRM 落地。
+        带重试：网盘偶发限流/超时时不立刻判失败，最多重试 3 次（指数退避），
+        避免一次抖动就把整棵子树漏扫。
         返回 (是否成功, 目录项列表, 错误信息)。
         """
         url = f"{self._openlist_url}/api/fs/list"
@@ -332,17 +360,32 @@ class OpenListScan(_PluginBase):
             "per_page": 0,   # 0 = 不分页，返回全部
             "refresh": True,  # 强制刷新，触发 Strm 懒生成
         }
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=30)
-            resp.raise_for_status()
-            data = resp.json() or {}
-            code = data.get("code")
-            if code != 200:
-                return False, [], f"OpenList 返回 {code}: {data.get('message')}"
-            content = (data.get("data") or {}).get("content") or []
-            return True, content, ""
-        except Exception as e:
-            return False, [], str(e)
+        last_err = ""
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=60)
+                resp.raise_for_status()
+                data = resp.json() or {}
+                code = data.get("code")
+                if code != 200:
+                    last_err = f"OpenList 返回 {code}: {data.get('message')}"
+                    # 429/限流类错误退避后重试；其它业务错误也重试一次看是否偶发
+                    if attempt < max_attempts:
+                        time.sleep(attempt * 2)
+                        continue
+                    return False, [], last_err
+                content = (data.get("data") or {}).get("content") or []
+                return True, content, ""
+            except Exception as e:
+                last_err = str(e)
+                if attempt < max_attempts:
+                    logger.warning(
+                        f"[{self.plugin_name}] 列目录 {path} 第 {attempt} 次失败，"
+                        f"{attempt * 2}s 后重试：{last_err}")
+                    time.sleep(attempt * 2)
+                    continue
+        return False, [], last_err
 
     def _trigger_transfer(self):
         """调用 MP TransferChain 对一个或多个源目录执行整理"""
@@ -465,8 +508,8 @@ class OpenListScan(_PluginBase):
                                       "增量天数 (0=全量)",
                                       placeholder="0"),
                             self._col(2, "VTextField", "scan_timeout",
-                                      "超时秒数",
-                                      placeholder="1800"),
+                                      "超时秒数 (0=不限)",
+                                      placeholder="0"),
                         ],
                     },
                     # 节流强度说明
@@ -546,7 +589,7 @@ class OpenListScan(_PluginBase):
             "openlist_token": "",
             "scan_path": "",
             "scan_limit": 20,
-            "scan_timeout": 1800,
+            "scan_timeout": 0,
             "recent_days": 0,
             "mp_source_path": "/media/云下载",
             "cron": "",
