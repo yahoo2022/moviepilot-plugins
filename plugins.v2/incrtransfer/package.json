@@ -1,0 +1,10 @@
+{
+  "id": "IncrTransfer",
+  "name": "增量整理刮削",
+  "description": "只整理最近 N 天新增/改动的媒体，支持电影/电视剧、复制/移动/链接/自动、目标路径与刮削",
+  "version": "1.0.0",
+  "author": "yahoo2022",
+  "author_url": "https://github.com/yahoo2022",
+  "icon": "directory.png",
+  "level": 1
+}

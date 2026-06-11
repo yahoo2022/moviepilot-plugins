@@ -17,6 +17,18 @@
       "v1.0.0": "初始版本：支持 Web UI / 远程命令 / Webhook / Cron 触发扫描与整理"
     }
   },
+  "IncrTransfer": {
+    "name": "增量整理刮削",
+    "description": "只整理最近 N 天新增/改动的媒体，支持电影/电视剧、复制/移动/链接/自动、目标路径与刮削",
+    "labels": "整理",
+    "version": "1.0.0",
+    "icon": "directory.png",
+    "author": "yahoo2022",
+    "level": 1,
+    "history": {
+      "v1.0.0": "初始版本：按文件 mtime 只整理最近 N 天新增/改动的媒体；支持电影/电视剧、复制/移动/硬链接/软链接/自动、整理单元(目录/文件)、目标路径、刮削开关、最小大小、强制整理、快速剪枝；Web/远程命令/Webhook/Cron 触发"
+    }
+  },
   "StrmRename": {
     "name": "STRM 剧集重命名助手",
     "description": "按上级目录名把纯数字 STRM 重命名为电视剧友好的 SxxExx 格式",

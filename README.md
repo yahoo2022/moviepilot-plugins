@@ -6,6 +6,7 @@
 |---|---|---|
 | `plugins.v2/openlistscan/` | OpenList 扫描触发器 | 一键触发 OpenList 扫描 + MP 目录整理 |
 | `plugins.v2/strmrename/` | STRM 剧集重命名助手 | 按上级目录名把纯数字 STRM 重命名为 SxxExx |
+| `plugins.v2/incrtransfer/` | 增量整理刮削 | 只整理最近 N 天新增/改动的媒体，支持电影/电视剧、复制/移动/链接/自动、目标路径与刮削 |
 
 > 仓库只面向 MoviePilot V2：索引为 `package.v2.json`，代码在 `plugins.v2/`。
 
@@ -24,5 +25,6 @@ https://github.com/jxxghp/MoviePilot-Plugins,https://github.com/yahoo2022/moviep
 ```bash
 cp -r plugins.v2/openlistscan /path/to/MoviePilot/config/plugins/
 cp -r plugins.v2/strmrename /path/to/MoviePilot/config/plugins/
+cp -r plugins.v2/incrtransfer /path/to/MoviePilot/config/plugins/
 docker compose restart moviepilot
 ```
