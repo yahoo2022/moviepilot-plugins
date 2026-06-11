@@ -47,7 +47,7 @@ class IncrTransfer(_PluginBase):
     plugin_name = "增量整理刮削"
     plugin_desc = "只整理最近 N 天新增/改动的媒体，支持电影/电视剧、复制/移动/链接/自动、目标路径与刮削"
     plugin_icon = "directory.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "incrtransfer_"
@@ -75,6 +75,10 @@ class IncrTransfer(_PluginBase):
     _target_path: str = ""
     # 刮削：default=跟随 MP 设置, on=强制刮削, off=不刮削
     _scrape: str = "default"
+    # 按类型分类（目标路径下按媒体类型建子目录，如 电影/电视剧）：default/on/off
+    _type_folder: str = "default"
+    # 按类别分类（目标路径下按二级分类建子目录，如 动画/纪录片）：default/on/off
+    _category_folder: str = "default"
     # 最小文件大小(MB)，过滤小样片
     _min_filesize: int = 0
     # 强制整理：忽略「已整理过」历史记录，重新整理
@@ -100,6 +104,8 @@ class IncrTransfer(_PluginBase):
             self._mtype = config.get("mtype") or ""
             self._target_path = (config.get("target_path") or "").strip()
             self._scrape = config.get("scrape") or "default"
+            self._type_folder = config.get("type_folder") or "default"
+            self._category_folder = config.get("category_folder") or "default"
             self._min_filesize = int(config.get("min_filesize") or 0)
             self._force = config.get("force", False)
             self._fast_prune = config.get("fast_prune", False)
@@ -133,6 +139,8 @@ class IncrTransfer(_PluginBase):
             "mtype": self._mtype,
             "target_path": self._target_path,
             "scrape": self._scrape,
+            "type_folder": self._type_folder,
+            "category_folder": self._category_folder,
             "min_filesize": self._min_filesize,
             "force": self._force,
             "fast_prune": self._fast_prune,
@@ -244,6 +252,15 @@ class IncrTransfer(_PluginBase):
         if self._scrape == "off":
             return False
         return None  # default：跟随 MP 设置
+
+    @staticmethod
+    def _tri_val(v: str) -> Optional[bool]:
+        """三态开关：on=True, off=False, 其它(default)=None(跟随 MP 设置)。"""
+        if v == "on":
+            return True
+        if v == "off":
+            return False
+        return None
 
     # ---------- 核心 ----------
 
@@ -391,6 +408,8 @@ class IncrTransfer(_PluginBase):
         chain = TransferChain()
         mtype = self._mtype_enum()
         scrape = self._scrape_val()
+        type_folder = self._tri_val(self._type_folder)
+        category_folder = self._tri_val(self._category_folder)
         ttype = self._transfer_type or None
         target = Path(self._target_path) if self._target_path else None
         ok_list: List[str] = []
@@ -418,6 +437,8 @@ class IncrTransfer(_PluginBase):
                     mtype=mtype,
                     transfer_type=ttype,
                     scrape=scrape,
+                    library_type_folder=type_folder,
+                    library_category_folder=category_folder,
                     min_filesize=self._min_filesize,
                     force=self._force,
                     background=True,
@@ -507,6 +528,18 @@ class IncrTransfer(_PluginBase):
                                       placeholder="/media/整理后"),
                         ],
                     },
+                    # 按类型分类 / 按类别分类（对齐 MP 手动整理的两个开关，避免刮削路径不一致）
+                    {
+                        "component": "VRow",
+                        "content": [
+                            self._select(6, "type_folder", "按类型分类 (目标路径下建 电影/电视剧 子目录)",
+                                         [("跟随 MP 设置", "default"),
+                                          ("开启", "on"), ("关闭", "off")]),
+                            self._select(6, "category_folder", "按类别分类 (目标路径下建 动画/纪录片 等子目录)",
+                                         [("跟随 MP 设置", "default"),
+                                          ("开启", "on"), ("关闭", "off")]),
+                        ],
+                    },
                     # 扩展名 / Cron
                     {
                         "component": "VRow",
@@ -540,6 +573,9 @@ class IncrTransfer(_PluginBase):
                                             "按单个文件=只整理那个文件。"
                                             "源目录/目标路径都填 MP 容器内路径"
                                             "（如 /media/云下载）。"
+                                            "「按类型/按类别分类」建议和你 MP 手动整理时"
+                                            "的两个开关保持一致（一般都开），否则刮削入库"
+                                            "路径会和手动整理不一样。"
                                             "可通过 Web 按钮、远程命令 /incr_transfer、"
                                             "Webhook 或 Cron 触发。",
                                         },
@@ -562,6 +598,8 @@ class IncrTransfer(_PluginBase):
             "transfer_type": "",
             "transfer_unit": "folder",
             "scrape": "default",
+            "type_folder": "default",
+            "category_folder": "default",
             "min_filesize": 0,
             "target_path": "",
             "media_exts": "",
