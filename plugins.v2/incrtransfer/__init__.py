@@ -47,7 +47,7 @@ class IncrTransfer(_PluginBase):
     plugin_name = "增量整理刮削"
     plugin_desc = "只整理最近 N 天新增/改动的媒体，支持电影/电视剧、复制/移动/链接/自动、目标路径与刮削"
     plugin_icon = "directory.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "incrtransfer_"
@@ -73,8 +73,8 @@ class IncrTransfer(_PluginBase):
     _mtype: str = ""
     # 目标路径（MP 容器内路径），留空=用 MP 媒体库默认目录
     _target_path: str = ""
-    # 刮削：default=跟随 MP 设置, on=强制刮削, off=不刮削
-    _scrape: str = "default"
+    # 刮削：on=强制刮削(默认), off=不刮削, default=跟随 MP 设置(填了目标路径时 MP 视为不刮削)
+    _scrape: str = "on"
     # 按类型分类（目标路径下按媒体类型建子目录，如 电影/电视剧）：default/on/off
     _type_folder: str = "default"
     # 按类别分类（目标路径下按二级分类建子目录，如 动画/纪录片）：default/on/off
@@ -103,7 +103,7 @@ class IncrTransfer(_PluginBase):
             self._transfer_type = config.get("transfer_type") or ""
             self._mtype = config.get("mtype") or ""
             self._target_path = (config.get("target_path") or "").strip()
-            self._scrape = config.get("scrape") or "default"
+            self._scrape = config.get("scrape") or "on"
             self._type_folder = config.get("type_folder") or "default"
             self._category_folder = config.get("category_folder") or "default"
             self._min_filesize = int(config.get("min_filesize") or 0)
@@ -519,8 +519,9 @@ class IncrTransfer(_PluginBase):
                         "component": "VRow",
                         "content": [
                             self._select(4, "scrape", "刮削元数据",
-                                         [("跟随 MP 设置", "default"),
-                                          ("强制刮削", "on"), ("不刮削", "off")]),
+                                         [("强制刮削", "on"),
+                                          ("不刮削", "off"),
+                                          ("跟随 MP 设置(填了目标路径=不刮削)", "default")]),
                             self._col(4, "VTextField", "min_filesize",
                                       "最小文件大小(MB)", placeholder="0"),
                             self._col(4, "VTextField", "target_path",
@@ -576,6 +577,9 @@ class IncrTransfer(_PluginBase):
                                             "「按类型/按类别分类」建议和你 MP 手动整理时"
                                             "的两个开关保持一致（一般都开），否则刮削入库"
                                             "路径会和手动整理不一样。"
+                                            "注意：填了「目标路径」时，刮削必须选"
+                                            "「强制刮削」才会下元数据/图片——选「跟随 MP "
+                                            "设置」MP 会当成不刮削（这是 MP 的行为）。"
                                             "可通过 Web 按钮、远程命令 /incr_transfer、"
                                             "Webhook 或 Cron 触发。",
                                         },
@@ -597,7 +601,7 @@ class IncrTransfer(_PluginBase):
             "mtype": "",
             "transfer_type": "",
             "transfer_unit": "folder",
-            "scrape": "default",
+            "scrape": "on",
             "type_folder": "default",
             "category_folder": "default",
             "min_filesize": 0,
