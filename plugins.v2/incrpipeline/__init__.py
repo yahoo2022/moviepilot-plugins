@@ -46,7 +46,7 @@ class IncrPipeline(_PluginBase):
     plugin_name = "增量入库流水线"
     plugin_desc = "一次触发顺序执行 OpenList 扫描生成 STRM + 增量整理刮削，两步各有独立开关"
     plugin_icon = "workflow.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "incrpipeline_"
@@ -59,8 +59,15 @@ class IncrPipeline(_PluginBase):
     # ---- 总开关 ----
     _enabled: bool = False
     _notify: bool = True
+    _notify_type: str = "Plugin"   # 通知类型，对应 MP 通知渠道路由
     _run_once: bool = False
     _cron: str = ""
+
+    # ---- 兜底 ----
+    # 单步超时（分钟）：任一步骤超过此时长视为超时；0=不限（适合刮削/生成STRM要1-2小时）
+    _step_timeout_min: int = 0
+    # 出错/超时即中止后续步骤（兜底）
+    _stop_on_error: bool = True
 
     # ---- 步骤开关 ----
     _do_scan: bool = True       # 第一步：OpenList 扫描
@@ -102,8 +109,12 @@ class IncrPipeline(_PluginBase):
         if config:
             self._enabled = config.get("enabled", False)
             self._notify = config.get("notify", True)
+            self._notify_type = config.get("notify_type") or "Plugin"
             self._run_once = config.get("run_once", False)
             self._cron = config.get("cron", "")
+
+            self._step_timeout_min = int(config.get("step_timeout_min") or 0)
+            self._stop_on_error = config.get("stop_on_error", True)
 
             self._do_scan = config.get("do_scan", True)
             self._do_transfer = config.get("do_transfer", True)
@@ -152,8 +163,11 @@ class IncrPipeline(_PluginBase):
         return {
             "enabled": self._enabled,
             "notify": self._notify,
+            "notify_type": self._notify_type,
             "run_once": self._run_once,
             "cron": self._cron,
+            "step_timeout_min": self._step_timeout_min,
+            "stop_on_error": self._stop_on_error,
             "do_scan": self._do_scan,
             "do_transfer": self._do_transfer,
             "do_emby": self._do_emby,
@@ -292,39 +306,85 @@ class IncrPipeline(_PluginBase):
 
     # ---------- 主流程 ----------
 
+    def _run_step(self, name: str, func) -> Tuple[bool, str]:
+        """
+        在子线程里执行单个步骤函数，套上「单步超时」兜底。
+        func 返回 (ok: bool, summary: str)。
+        返回同样的 (ok, summary)；超时则 ok=False 且 summary 标注超时。
+        注意：超时只是「不再等待、判失败、中止后续」，已经在跑的后台线程
+        （如 MP 队列、OpenList 列目录）无法强杀，但不会再阻塞流水线。
+        """
+        result: Dict[str, Any] = {}
+
+        def _worker():
+            try:
+                ok, summary = func()
+                result["ok"] = ok
+                result["summary"] = summary
+            except Exception as e:
+                logger.error(f"[{self.plugin_name}] {name} 执行异常: {e}")
+                result["ok"] = False
+                result["summary"] = f"执行异常: {e}"
+
+        t = threading.Thread(target=_worker, name=f"incrpipeline-{name}", daemon=True)
+        start = time.time()
+        t.start()
+        timeout = self._step_timeout_min * 60 if self._step_timeout_min > 0 else None
+        t.join(timeout)
+        if t.is_alive():
+            # 超时：不再等待
+            mins = self._step_timeout_min
+            msg = (f"超时：超过 {mins} 分钟仍未完成，已停止等待"
+                   f"（该步骤后台可能仍在跑，但流水线不再阻塞）")
+            logger.warning(f"[{self.plugin_name}] {name} {msg}")
+            return False, msg
+        elapsed = int(time.time() - start)
+        ok = result.get("ok", False)
+        summary = result.get("summary", "无返回")
+        return ok, f"{summary}（耗时 {elapsed} 秒）"
+
     def _run_task(self):
-        """流水线：第一步 OpenList 扫描（同步阻塞）→ 第二步增量整理刮削 → 第三步 Emby 扫描。"""
+        """
+        流水线：第一步 OpenList 扫描 → 第二步增量整理刮削（同步等待完成）→ 第三步 Emby 扫描。
+        - 每步串行，前一步真正结束才进入下一步（方案A，整理同步等待入库完成）。
+        - 兜底：单步超时 / 出错时，按「出错即中止」开关决定是否继续后续步骤。
+        """
         if not self._do_scan and not self._do_transfer and not self._do_emby:
             self._send_notify("流水线未执行", "三个步骤开关都关闭了，没有可执行的步骤")
             return
 
         summary_parts: List[str] = []
+        aborted = False
 
         # ===== 第一步：OpenList 扫描 =====
         if self._do_scan:
-            scan_ok, scan_summary = self._run_scan()
-            summary_parts.append("【第一步 OpenList 扫描】\n" + scan_summary)
-            if not scan_ok and self._do_transfer:
-                # 扫描完全失败时，仍按用户配置继续整理已有内容，但提示风险
-                logger.warning(f"[{self.plugin_name}] 扫描未完全成功，仍继续整理已有 STRM")
+            ok, summary = self._run_step("OpenList 扫描", self._run_scan)
+            summary_parts.append(f"【第一步 OpenList 扫描】{'✅' if ok else '❌'}\n{summary}")
+            if not ok and self._stop_on_error:
+                summary_parts.append("⚠️ 第一步未成功，已按「出错即中止」停止后续步骤")
+                aborted = True
         else:
             summary_parts.append("【第一步 OpenList 扫描】已跳过（开关关闭）")
 
-        # ===== 第二步：增量整理刮削 =====
-        if self._do_transfer:
-            transfer_summary = self._run_transfer()
-            summary_parts.append("【第二步 增量整理刮削】\n" + transfer_summary)
-        else:
+        # ===== 第二步：增量整理刮削（同步等待整理完成）=====
+        if not aborted and self._do_transfer:
+            ok, summary = self._run_step("增量整理刮削", self._run_transfer)
+            summary_parts.append(f"【第二步 增量整理刮削】{'✅' if ok else '❌'}\n{summary}")
+            if not ok and self._stop_on_error:
+                summary_parts.append("⚠️ 第二步未成功，已按「出错即中止」停止后续步骤")
+                aborted = True
+        elif not self._do_transfer:
             summary_parts.append("【第二步 增量整理刮削】已跳过（开关关闭）")
 
         # ===== 第三步：触发 Emby 媒体库全量扫描 =====
-        if self._do_emby:
-            emby_summary = self._run_emby_scan()
-            summary_parts.append("【第三步 Emby 媒体库扫描】\n" + emby_summary)
-        else:
+        if not aborted and self._do_emby:
+            ok, summary = self._run_step("Emby 媒体库扫描", self._run_emby_scan)
+            summary_parts.append(f"【第三步 Emby 媒体库扫描】{'✅' if ok else '❌'}\n{summary}")
+        elif not self._do_emby:
             summary_parts.append("【第三步 Emby 媒体库扫描】已跳过（开关关闭）")
 
-        self._send_notify("增量入库流水线完成", "\n\n".join(summary_parts))
+        title = "增量入库流水线完成" if not aborted else "增量入库流水线中止（含失败）"
+        self._send_notify(title, "\n\n".join(summary_parts))
 
     # ---------- 第一步：OpenList 扫描 ----------
 
@@ -469,12 +529,12 @@ class IncrPipeline(_PluginBase):
 
     # ---------- 第三步：Emby 媒体库扫描 ----------
 
-    def _run_emby_scan(self) -> str:
+    def _run_emby_scan(self) -> Tuple[bool, str]:
         """触发 Emby 全库扫描：POST /Library/Refresh（Emby 会异步扫描所有媒体库）。"""
         if not self._emby_host or not self._emby_apikey:
             msg = "Emby 地址或 API Key 未配置"
             logger.error(f"[{self.plugin_name}] {msg}")
-            return msg
+            return False, msg
         url = f"{self._emby_host}/Library/Refresh"
         try:
             resp = requests.post(url, params={"api_key": self._emby_apikey}, timeout=30)
@@ -482,21 +542,21 @@ class IncrPipeline(_PluginBase):
             if resp.status_code in (200, 204):
                 msg = "已触发 Emby 全库扫描（Emby 后台异步执行，稍后入库）"
                 logger.info(f"[{self.plugin_name}] {msg}")
-                return msg
+                return True, msg
             msg = f"Emby 返回 HTTP {resp.status_code}: {resp.text[:200]}"
             logger.error(f"[{self.plugin_name}] 触发 Emby 扫描失败：{msg}")
-            return msg
+            return False, msg
         except Exception as e:
             msg = f"触发 Emby 扫描异常：{e}"
             logger.error(f"[{self.plugin_name}] {msg}")
-            return msg
+            return False, msg
 
     # ---------- 第二步：增量整理刮削 ----------
 
-    def _run_transfer(self) -> str:
+    def _run_transfer(self) -> Tuple[bool, str]:
         src_paths = self._split_paths(self._src_paths)
         if not src_paths:
-            return "源目录未配置，跳过整理"
+            return False, "源目录未配置，跳过整理"
 
         cutoff_ts: Optional[float] = None
         if self._recent_days and self._recent_days > 0:
@@ -531,20 +591,23 @@ class IncrPipeline(_PluginBase):
                 text += f"（最近 {self._recent_days} 天无新增/改动媒体）"
             if scan_errs:
                 text += "\n" + "\n".join(scan_errs)
-            return text
+            # 没有新内容不算失败，源目录不存在才算告警
+            return (not scan_errs), text
 
         ok_list, fail_list = self._do_transfer_targets(all_targets)
 
         parts = [f"模式: {mode}，待整理 {len(all_targets)} 项"]
         if ok_list:
-            parts.append(f"已提交 {len(ok_list)} 项:\n" + "\n".join(ok_list[:20])
+            parts.append(f"已完成 {len(ok_list)} 项:\n" + "\n".join(ok_list[:20])
                          + ("\n..." if len(ok_list) > 20 else ""))
         if fail_list:
             parts.append(f"失败 {len(fail_list)} 项:\n" + "\n".join(fail_list[:20])
                          + ("\n..." if len(fail_list) > 20 else ""))
         if scan_errs:
             parts.append("扫描告警:\n" + "\n".join(scan_errs))
-        return "\n".join(parts)
+        # 有失败项或扫描告警则视为未完全成功
+        ok = (not fail_list) and (not scan_errs)
+        return ok, "\n".join(parts)
 
     def _collect_targets(self, root: Path, cutoff_ts: Optional[float]) -> List[Tuple[str, str]]:
         if cutoff_ts is None:
@@ -646,7 +709,7 @@ class IncrPipeline(_PluginBase):
                     library_category_folder=category_folder,
                     min_filesize=self._min_filesize,
                     force=self._force,
-                    background=True,
+                    background=False,  # 方案A：同步等待整理+刮削真正完成再返回
                 )
                 if ok:
                     ok_list.append(str(p))
@@ -659,12 +722,20 @@ class IncrPipeline(_PluginBase):
 
         return ok_list, fail_list
 
+    def _notify_type_enum(self):
+        """把配置的通知类型字符串映射为 MP 的 NotificationType 枚举。"""
+        try:
+            from app.schemas.types import NotificationType as NT
+            return getattr(NT, self._notify_type, NT.Plugin)
+        except Exception:
+            return NotificationType.Plugin
+
     def _send_notify(self, title: str, text: str):
         if not self._notify:
             return
         try:
             self.post_message(
-                mtype=NotificationType.SiteMessage,
+                mtype=self._notify_type_enum(),
                 title=f"【{self.plugin_name}】{title}",
                 text=text,
             )
@@ -688,6 +759,20 @@ class IncrPipeline(_PluginBase):
                                       "立即执行一次 (保存后生效，随后自动关闭)"),
                             self._col(6, "VTextField", "cron",
                                       "Cron 定时 (可选)", placeholder="0 */6 * * *"),
+                        ],
+                    },
+                    # 兜底 / 通知路由
+                    {
+                        "component": "VRow",
+                        "content": [
+                            self._col(4, "VSwitch", "stop_on_error",
+                                      "出错/超时即中止后续步骤"),
+                            self._col(4, "VTextField", "step_timeout_min",
+                                      "单步超时(分钟,0=不限)", placeholder="0"),
+                            self._select(4, "notify_type", "通知类型(对应 MP 渠道)",
+                                         [("插件", "Plugin"), ("整理入库", "Organize"),
+                                          ("媒体服务器", "MediaServer"),
+                                          ("站点", "SiteMessage"), ("其它", "Other")]),
                         ],
                     },
                     # 步骤开关
@@ -821,9 +906,14 @@ class IncrPipeline(_PluginBase):
                                             "type": "info",
                                             "variant": "tonal",
                                             "text": "流水线顺序执行：先 OpenList 扫描"
-                                            "（递归列目录触发 STRM 懒生成，同步阻塞），"
-                                            "完成后增量整理刮削，最后可选触发 Emby 全库扫描。"
-                                            "三步各有开关，可任意单独开启。"
+                                            "（递归列目录触发 STRM 懒生成），完成后增量整理"
+                                            "刮削（同步等待真正整理+刮削入库完成再继续），"
+                                            "最后可选触发 Emby 全库扫描。三步各有开关。"
+                                            "兜底：单步超时(分钟)到了不再等待、判失败；"
+                                            "开「出错/超时即中止」时任一步失败就停止后续；"
+                                            "超时填 0=不限（刮削/生成STRM 要 1-2 小时也不会被掐）。"
+                                            "通知走 MP 自身通知系统，按「通知类型」路由到你在"
+                                            "MP 后台配置的渠道，不用在插件里另配 webhook。"
                                             "扫描路径填 OpenList 挂载路径（如 /云下载）；"
                                             "源目录/目标路径填 MP 容器内路径（如 /media/云下载）。"
                                             "填了「目标路径」时刮削必须选「强制刮削」才会下"
@@ -843,8 +933,11 @@ class IncrPipeline(_PluginBase):
         ], {
             "enabled": False,
             "notify": True,
+            "notify_type": "Plugin",
             "run_once": False,
             "cron": "",
+            "stop_on_error": True,
+            "step_timeout_min": 0,
             "do_scan": True,
             "do_transfer": True,
             "do_emby": False,
