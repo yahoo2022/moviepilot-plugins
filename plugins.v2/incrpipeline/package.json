@@ -1,0 +1,10 @@
+{
+  "id": "IncrPipeline",
+  "name": "增量入库流水线",
+  "description": "一次触发顺序执行 OpenList 扫描生成 STRM + 增量整理刮削，两步各有独立开关",
+  "version": "1.0.0",
+  "author": "yahoo2022",
+  "author_url": "https://github.com/yahoo2022",
+  "icon": "workflow.png",
+  "level": 1
+}

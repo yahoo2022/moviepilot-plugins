@@ -1,4 +1,16 @@
 {
+  "IncrPipeline": {
+    "name": "增量入库流水线",
+    "description": "一次触发顺序执行 OpenList 扫描生成 STRM + 增量整理刮削，两步各有独立开关",
+    "labels": "整理",
+    "version": "1.0.0",
+    "icon": "workflow.png",
+    "author": "yahoo2022",
+    "level": 1,
+    "history": {
+      "v1.0.0": "初始版本：合并 OpenList 扫描触发器 + 增量整理刮削为一条流水线，顺序执行(扫描同步阻塞完成后再整理)，两步各有独立开关可单独使用；配置自动保存；Web/远程命令 /incr_pipeline/Webhook/Cron 触发"
+    }
+  },
   "OpenListScan": {
     "name": "OpenList 扫描触发器",
     "description": "一键触发 OpenList 目录扫描，并在扫描完成后自动执行 MP 目录整理",
