@@ -3,11 +3,12 @@
     "name": "增量入库流水线",
     "description": "一次触发顺序执行 OpenList 扫描生成 STRM + 增量整理刮削，两步各有独立开关",
     "labels": "整理",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "icon": "workflow.png",
     "author": "yahoo2022",
     "level": 1,
     "history": {
+      "v1.1.0": "新增第三步：触发 Emby 媒体库全量扫描(POST /Library/Refresh)，带独立开关；修复扫描参数行窄字段标签显示不全(改为整行三等分)",
       "v1.0.0": "初始版本：合并 OpenList 扫描触发器 + 增量整理刮削为一条流水线，顺序执行(扫描同步阻塞完成后再整理)，两步各有独立开关可单独使用；配置自动保存；Web/远程命令 /incr_pipeline/Webhook/Cron 触发"
     }
   },

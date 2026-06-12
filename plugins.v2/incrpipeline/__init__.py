@@ -46,7 +46,7 @@ class IncrPipeline(_PluginBase):
     plugin_name = "增量入库流水线"
     plugin_desc = "一次触发顺序执行 OpenList 扫描生成 STRM + 增量整理刮削，两步各有独立开关"
     plugin_icon = "workflow.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "incrpipeline_"
@@ -65,6 +65,11 @@ class IncrPipeline(_PluginBase):
     # ---- 步骤开关 ----
     _do_scan: bool = True       # 第一步：OpenList 扫描
     _do_transfer: bool = True   # 第二步：增量整理刮削
+    _do_emby: bool = False      # 第三步：触发 Emby 媒体库扫描（全量）
+
+    # ---- 第三步：Emby 媒体库扫描参数 ----
+    _emby_host: str = ""        # 如 http://192.168.1.126:8096
+    _emby_apikey: str = ""
 
     # ---- 第一步：OpenList 扫描参数 ----
     _openlist_url: str = ""
@@ -102,6 +107,9 @@ class IncrPipeline(_PluginBase):
 
             self._do_scan = config.get("do_scan", True)
             self._do_transfer = config.get("do_transfer", True)
+            self._do_emby = config.get("do_emby", False)
+            self._emby_host = (config.get("emby_host") or "").rstrip("/")
+            self._emby_apikey = config.get("emby_apikey", "")
 
             self._openlist_url = (config.get("openlist_url") or "").rstrip("/")
             self._openlist_token = config.get("openlist_token", "")
@@ -148,6 +156,9 @@ class IncrPipeline(_PluginBase):
             "cron": self._cron,
             "do_scan": self._do_scan,
             "do_transfer": self._do_transfer,
+            "do_emby": self._do_emby,
+            "emby_host": self._emby_host,
+            "emby_apikey": self._emby_apikey,
             "openlist_url": self._openlist_url,
             "openlist_token": self._openlist_token,
             "scan_path": self._scan_path,
@@ -282,9 +293,9 @@ class IncrPipeline(_PluginBase):
     # ---------- 主流程 ----------
 
     def _run_task(self):
-        """流水线：第一步 OpenList 扫描（同步阻塞）→ 第二步增量整理刮削。"""
-        if not self._do_scan and not self._do_transfer:
-            self._send_notify("流水线未执行", "两个步骤开关都关闭了，没有可执行的步骤")
+        """流水线：第一步 OpenList 扫描（同步阻塞）→ 第二步增量整理刮削 → 第三步 Emby 扫描。"""
+        if not self._do_scan and not self._do_transfer and not self._do_emby:
+            self._send_notify("流水线未执行", "三个步骤开关都关闭了，没有可执行的步骤")
             return
 
         summary_parts: List[str] = []
@@ -305,6 +316,13 @@ class IncrPipeline(_PluginBase):
             summary_parts.append("【第二步 增量整理刮削】\n" + transfer_summary)
         else:
             summary_parts.append("【第二步 增量整理刮削】已跳过（开关关闭）")
+
+        # ===== 第三步：触发 Emby 媒体库全量扫描 =====
+        if self._do_emby:
+            emby_summary = self._run_emby_scan()
+            summary_parts.append("【第三步 Emby 媒体库扫描】\n" + emby_summary)
+        else:
+            summary_parts.append("【第三步 Emby 媒体库扫描】已跳过（开关关闭）")
 
         self._send_notify("增量入库流水线完成", "\n\n".join(summary_parts))
 
@@ -448,6 +466,30 @@ class IncrPipeline(_PluginBase):
                     time.sleep(attempt * 2)
                     continue
         return False, [], last_err
+
+    # ---------- 第三步：Emby 媒体库扫描 ----------
+
+    def _run_emby_scan(self) -> str:
+        """触发 Emby 全库扫描：POST /Library/Refresh（Emby 会异步扫描所有媒体库）。"""
+        if not self._emby_host or not self._emby_apikey:
+            msg = "Emby 地址或 API Key 未配置"
+            logger.error(f"[{self.plugin_name}] {msg}")
+            return msg
+        url = f"{self._emby_host}/Library/Refresh"
+        try:
+            resp = requests.post(url, params={"api_key": self._emby_apikey}, timeout=30)
+            # Emby 成功返回 204 No Content
+            if resp.status_code in (200, 204):
+                msg = "已触发 Emby 全库扫描（Emby 后台异步执行，稍后入库）"
+                logger.info(f"[{self.plugin_name}] {msg}")
+                return msg
+            msg = f"Emby 返回 HTTP {resp.status_code}: {resp.text[:200]}"
+            logger.error(f"[{self.plugin_name}] 触发 Emby 扫描失败：{msg}")
+            return msg
+        except Exception as e:
+            msg = f"触发 Emby 扫描异常：{e}"
+            logger.error(f"[{self.plugin_name}] {msg}")
+            return msg
 
     # ---------- 第二步：增量整理刮削 ----------
 
@@ -652,10 +694,12 @@ class IncrPipeline(_PluginBase):
                     {
                         "component": "VRow",
                         "content": [
-                            self._col(6, "VSwitch", "do_scan",
-                                      "第一步：执行 OpenList 扫描 (生成 STRM)"),
-                            self._col(6, "VSwitch", "do_transfer",
-                                      "第二步：执行增量整理刮削"),
+                            self._col(4, "VSwitch", "do_scan",
+                                      "第一步：OpenList 扫描"),
+                            self._col(4, "VSwitch", "do_transfer",
+                                      "第二步：增量整理刮削"),
+                            self._col(4, "VSwitch", "do_emby",
+                                      "第三步：Emby 全库扫描"),
                         ],
                     },
                     # === 第一步标题 ===
@@ -673,14 +717,19 @@ class IncrPipeline(_PluginBase):
                     {
                         "component": "VRow",
                         "content": [
-                            self._col(6, "VTextarea", "scan_path",
+                            self._col(12, "VTextarea", "scan_path",
                                       "扫描路径 (OpenList 挂载路径，多个换行)",
                                       placeholder="/云下载\n/TV", rows=2, autoGrow=True),
-                            self._col(2, "VTextField", "scan_limit",
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            self._col(4, "VTextField", "scan_limit",
                                       "节流强度 (越大越慢)", placeholder="20"),
-                            self._col(2, "VTextField", "scan_recent_days",
+                            self._col(4, "VTextField", "scan_recent_days",
                                       "扫描增量天数 (0=全量)", placeholder="0"),
-                            self._col(2, "VTextField", "scan_timeout",
+                            self._col(4, "VTextField", "scan_timeout",
                                       "超时秒数 (0=不限)", placeholder="0"),
                         ],
                     },
@@ -745,6 +794,19 @@ class IncrPipeline(_PluginBase):
                             self._col(2, "VSwitch", "fast_prune", "快速模式"),
                         ],
                     },
+                    # === 第三步标题 ===
+                    self._subtitle("第三步 · Emby 媒体库扫描（全量，整理完通知 Emby 刷新入库）"),
+                    {
+                        "component": "VRow",
+                        "content": [
+                            self._col(6, "VTextField", "emby_host",
+                                      "Emby 地址",
+                                      placeholder="http://192.168.1.126:8096"),
+                            self._col(6, "VTextField", "emby_apikey",
+                                      "Emby API Key",
+                                      placeholder="Emby 后台生成的 API Key"),
+                        ],
+                    },
                     # 说明
                     {
                         "component": "VRow",
@@ -760,7 +822,8 @@ class IncrPipeline(_PluginBase):
                                             "variant": "tonal",
                                             "text": "流水线顺序执行：先 OpenList 扫描"
                                             "（递归列目录触发 STRM 懒生成，同步阻塞），"
-                                            "完成后再增量整理刮削。两步各有开关，可只开一步。"
+                                            "完成后增量整理刮削，最后可选触发 Emby 全库扫描。"
+                                            "三步各有开关，可任意单独开启。"
                                             "扫描路径填 OpenList 挂载路径（如 /云下载）；"
                                             "源目录/目标路径填 MP 容器内路径（如 /media/云下载）。"
                                             "填了「目标路径」时刮削必须选「强制刮削」才会下"
@@ -784,6 +847,9 @@ class IncrPipeline(_PluginBase):
             "cron": "",
             "do_scan": True,
             "do_transfer": True,
+            "do_emby": False,
+            "emby_host": "",
+            "emby_apikey": "",
             "openlist_url": "",
             "openlist_token": "",
             "scan_path": "",
