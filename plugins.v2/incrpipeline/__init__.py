@@ -454,7 +454,7 @@ class IncrPipeline(_PluginBase):
                 else:
                     file_count += 1
             logger.info(f"[{self.plugin_name}] [{dir_count}] 列目录 {cur}"
-                        f"：子目录 {sub_dirs} 个，待扫 {len(stack)} 个")
+                        f"：子目录 {sub_dirs} 个，文件 {file_count} 个，待扫 {len(stack)} 个，本层共 {len(entries)} 条")
             if throttle:
                 time.sleep(throttle)
 
@@ -515,7 +515,10 @@ class IncrPipeline(_PluginBase):
                         time.sleep(attempt * 2)
                         continue
                     return False, [], last_err
-                content = (data.get("data") or {}).get("content") or []
+                raw_data = data.get("data") or {}
+                content = raw_data.get("content") or []
+                total = raw_data.get("total", "?")
+                logger.debug(f"[{self.plugin_name}] 列目录 {path} 返回 total={total} content={len(content)} 条")
                 return True, content, ""
             except Exception as e:
                 last_err = str(e)
