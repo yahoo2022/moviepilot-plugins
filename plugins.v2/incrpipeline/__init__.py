@@ -500,7 +500,7 @@ class IncrPipeline(_PluginBase):
             "Authorization": self._openlist_token,
             "Content-Type": "application/json",
         }
-        payload = {"path": path, "page": 1, "per_page": 0, "refresh": True}
+        payload = {"path": path, "page": 1, "per_page": 10000, "refresh": True}
         last_err = ""
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
