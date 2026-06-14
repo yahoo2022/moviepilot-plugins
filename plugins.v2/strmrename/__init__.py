@@ -32,7 +32,7 @@ class StrmRename(_PluginBase):
     plugin_name = "STRM 剧集重命名助手"
     plugin_desc = "按上级目录名把纯数字 STRM 重命名为电视剧友好的 SxxExx 格式"
     plugin_icon = "edit.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     plugin_author = "ahnuchen"
     author_url = "https://github.com/ahnuchen"
     plugin_config_prefix = "strmrename_"
@@ -53,6 +53,8 @@ class StrmRename(_PluginBase):
     _touch_mtime: bool = True           # 改名后刷新 mtime，便于增量整理捡到
     _clean_junk: bool = False           # 删除垃圾 .strm（更多原盘请访问 / 首发广告等）
     _junk_keywords: str = ""            # 垃圾关键字，换行/逗号分隔
+    _recent_days: int = 0               # 只处理最近 N 天内改动的文件，0=全量
+    _after_date: str = ""               # 只处理此日期(含)之后改动的文件，YYYY-MM-DD，优先于 recent_days
     _template: str = "{title}.S{season:02d}E{episode:02d}{tail}.strm"
     _cron: str = ""
     _scheduler: Optional[BackgroundScheduler] = None
@@ -82,6 +84,8 @@ class StrmRename(_PluginBase):
             self._touch_mtime = config.get("touch_mtime", True)
             self._clean_junk = config.get("clean_junk", False)
             self._junk_keywords = config.get("junk_keywords") or ""
+            self._recent_days = int(config.get("recent_days") or 0)
+            self._after_date = (config.get("after_date") or "").strip()
             self._template = (
                 config.get("template")
                 or "{title}.S{season:02d}E{episode:02d}{tail}.strm"
@@ -118,6 +122,8 @@ class StrmRename(_PluginBase):
             "touch_mtime": self._touch_mtime,
             "clean_junk": self._clean_junk,
             "junk_keywords": self._junk_keywords,
+            "recent_days": self._recent_days,
+            "after_date": self._after_date,
             "template": self._template,
             "cron": self._cron,
         }
@@ -179,6 +185,19 @@ class StrmRename(_PluginBase):
         threading.Thread(target=self._run_task, daemon=True).start()
         return {"success": True, "message": "已触发重命名，详情见 MP 日志"}
 
+    def _cutoff_ts(self) -> Optional[float]:
+        """计算日期增量的 mtime 下限。after_date 优先于 recent_days；都没设则 None=全量。"""
+        if self._after_date:
+            try:
+                dt = datetime.strptime(self._after_date, "%Y-%m-%d")
+                dt = pytz.timezone(settings.TZ).localize(dt)
+                return dt.timestamp()
+            except Exception as e:
+                logger.warning(f"[{self.plugin_name}] after_date 格式错误({self._after_date})，忽略: {e}")
+        if self._recent_days and self._recent_days > 0:
+            return (datetime.now() - timedelta(days=self._recent_days)).timestamp()
+        return None
+
     def _run_task(self):
         root = Path(self._root_path)
         if not root.exists():
@@ -193,7 +212,9 @@ class StrmRename(_PluginBase):
             return
 
         files = root.rglob("*.strm") if self._recursive else root.glob("*.strm")
+        cutoff_ts = self._cutoff_ts()
         scanned = renamed = skipped = conflicts = failed = junked = 0
+        date_skipped = 0
         # 明细：(动作, 原因, 原路径, 目标/说明)
         details: List[Tuple[str, str, str, str]] = []
         reason_count: Dict[str, int] = {}
@@ -201,6 +222,15 @@ class StrmRename(_PluginBase):
         for file_path in files:
             scanned += 1
             try:
+                # 日期增量过滤：只处理 cutoff 之后改动的文件，保护老的正确内容
+                if cutoff_ts is not None:
+                    try:
+                        if file_path.stat().st_mtime < cutoff_ts:
+                            date_skipped += 1
+                            continue
+                    except OSError:
+                        date_skipped += 1
+                        continue
                 # 垃圾文件优先处理
                 if self._clean_junk and self._is_junk(file_path):
                     if self._delete_junk(file_path):
@@ -230,9 +260,15 @@ class StrmRename(_PluginBase):
         # 跳过原因分布，帮助判断“为什么没扫到垃圾/没改名”
         skip_brief = "，".join(f"{k}:{v}" for k, v in sorted(
             reason_count.items(), key=lambda x: -x[1])) or "无"
+        date_info = ""
+        if self._after_date:
+            date_info = f"\n日期过滤：仅处理 {self._after_date} 之后，跳过旧文件 {date_skipped}"
+        elif self._recent_days > 0:
+            date_info = f"\n日期过滤：仅最近 {self._recent_days} 天，跳过旧文件 {date_skipped}"
         msg = (
             f"{mode}完成：扫描 {scanned}，重命名 {renamed}，"
             f"清理垃圾 {junked}，跳过 {skipped}，冲突 {conflicts}，失败 {failed}"
+            f"{date_info}"
             f"\n跳过原因分布：{skip_brief}"
         )
         report_path = self._write_report(mode, msg, details)
@@ -268,28 +304,39 @@ class StrmRename(_PluginBase):
         if file_path.suffix.lower() != ".strm":
             return False, "not_strm", ""
 
-        already_named = self._looks_named(file_path.stem)
-
-        # 已含 SxxExx：默认跳过；开启 force_parent_title 时用上级目录名重写标题
-        # （专治 Yi.Wu.Zhi.S01E22 这类拼音命名，把标题换成父目录中文名）
-        if already_named and not self._force_parent_title:
-            if self._skip_existing_named:
-                return False, "already_named", ""
+        stem = file_path.stem
+        already_named = self._looks_named(stem)
 
         if already_named:
-            parsed = self._parse_named(file_path.stem)
+            # 文件名已含 SxxExx —— 这类 MP 基本都能识别，默认不动。
+            # 仅当：标题部分没有中文（纯拼音/英文，如 Yi.Wu.Zhi / Sniper.Butterfly）
+            #       且开启了 force_parent_title 时，才用「清洗后的父目录中文名」补救。
+            if not self._force_parent_title:
+                return False, "already_named", "已含SxxExx，跳过"
+            if self._title_has_cjk(stem):
+                # 文件名里已经有中文剧名（如 落日.Sunset.S01E04），无需补救
+                return False, "named_has_cjk", "文件名已含中文标题，跳过"
+            parsed = self._parse_named(stem)
+            if not parsed:
+                return False, "not_episode", "未识别出季集"
+            episode, tail, parsed_season = parsed
+            title, season = self._title_and_season(file_path.parent)
+            if not title or not self._has_cjk(title):
+                # 父目录清洗后不是中文剧名，补救没意义，避免改脏
+                return False, "no_clean_title", "父目录无干净中文名，跳过"
+            if parsed_season is not None:
+                season = parsed_season
         else:
-            parsed = self._parse_episode(file_path.stem)
-        if not parsed:
-            return False, "not_episode", "未识别出集数"
-        episode, tail, parsed_season = parsed
-
-        title, season = self._title_and_season(file_path.parent)
-        if not title:
-            return False, "no_title", "上级目录名为空"
-        # 从原文件名解析到的季优先（如 S02E05 保留 S02）
-        if parsed_season is not None:
-            season = parsed_season
+            # 裸集号 / 第N集：MP 必然认错，必须补标题
+            parsed = self._parse_episode(stem)
+            if not parsed:
+                return False, "not_episode", "未识别出集数"
+            episode, tail, parsed_season = parsed
+            title, season = self._title_and_season(file_path.parent)
+            if not title:
+                return False, "no_title", "上级目录名为空"
+            if parsed_season is not None:
+                season = parsed_season
 
         if not self._preserve_tail:
             tail = ""
@@ -321,6 +368,16 @@ class StrmRename(_PluginBase):
                 except OSError as e:
                     logger.warning(f"[{self.plugin_name}] 刷新 mtime 失败 {target}: {e}")
         return True, "renamed", new_name
+
+    @staticmethod
+    def _has_cjk(text: str) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]", text))
+
+    def _title_has_cjk(self, stem: str) -> bool:
+        """判断文件名 SxxExx 之前的“标题部分”是否含中文。"""
+        match = re.search(r"(?i)\bS\d{1,2}E\d{1,4}\b", stem)
+        head = stem[:match.start()] if match else stem
+        return self._has_cjk(head)
 
     # 清晰度/来源等“干净”后缀标记，只有这些会被保留进文件名 tail
     _QUALITY_RE = re.compile(
@@ -413,7 +470,7 @@ class StrmRename(_PluginBase):
 
     def _title_and_season(self, parent: Path) -> Tuple[str, int]:
         season = self._default_season
-        title = parent.name
+        raw = parent.name
 
         season_match = re.match(
             r"(?i)^(?:S|Season\s*|第)(\d{1,2})(?:季)?$",
@@ -421,13 +478,40 @@ class StrmRename(_PluginBase):
         )
         if season_match and parent.parent.name:
             season = int(season_match.group(1))
-            title = parent.parent.name
+            raw = parent.parent.name
 
-        return self._clean_title(title), season
+        return self._clean_title(raw), season
 
     @staticmethod
     def _clean_title(title: str) -> str:
-        return re.sub(r"\s+", " ", title).strip(" ._-")
+        """把脏目录名清洗成干净剧名。
+
+        例：【高清剧集网发布 www.TTHDTT.com】狙击蝴蝶[全30集][国语配音+中文字幕].Sniper.Butterfly.S01.1080p.HamiVideo.WEB-DL.AAC2.0.H.264-BlackTV
+            -> 狙击蝴蝶
+        """
+        t = title
+        # 1) 去掉【...】【...】整块（发布组/站点广告）
+        t = re.sub(r"【[^】]*】", " ", t)
+        # 2) 去掉 [全30集] [中文字幕] [国语配音] 等方括号块
+        t = re.sub(r"\[[^\]]*\]", " ", t)
+        # 3) 去掉域名 www.xxx.com / xxx.net 等
+        t = re.sub(r"(?i)\b(?:www\.)?[a-z0-9-]+\.(?:com|net|cc|me|tv|xyz|org|cn)\b", " ", t)
+        # 4) 在第一个“技术标记”处截断：季号/年份/清晰度/来源/编码
+        cut = re.split(
+            r"(?i)(?:\.|\s|_)(?:S\d{1,2}(?:E\d+)?|Season\b|(?:19|20)\d{2}\b|"
+            r"2160p|1080p|1080i|720p|576p|480p|4k|8k|uhd|hdr|web-?dl|webrip|"
+            r"bluray|blu-ray|remux|hdtv|x264|x265|h\.?264|h\.?265|hevc|"
+            r"60fps|10bit)",
+            t,
+            maxsplit=1,
+        )
+        t = cut[0] if cut else t
+        t = t.strip(" .-_·")
+        # 5) 若同时含中文和英文（如“狙击蝴蝶.Sniper.Butterfly”），优先取前导中文段
+        cjk = re.match(r"^([\u4e00-\u9fff0-9：·\s]+)", t)
+        if cjk and re.search(r"[\u4e00-\u9fff]", cjk.group(1)):
+            t = cjk.group(1)
+        return re.sub(r"\s+", " ", t).strip(" .-_·")
 
     @staticmethod
     def _safe_name(name: str) -> str:
@@ -500,6 +584,17 @@ class StrmRename(_PluginBase):
                     {
                         "component": "VRow",
                         "content": [
+                            self._col(6, "VTextField", "after_date",
+                                      "只处理此日期之后改动的文件 (YYYY-MM-DD，优先)",
+                                      placeholder="2026-06-12"),
+                            self._col(6, "VTextField", "recent_days",
+                                      "只处理最近 N 天改动 (0=全量)",
+                                      placeholder="0"),
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
                             self._col(12, "VTextarea", "junk_keywords",
                                       "垃圾关键字 (换行或逗号分隔，留空用内置默认)",
                                       placeholder="更多原盘请访问\n120帧全球首发\n全球首发\nwww."),
@@ -517,14 +612,16 @@ class StrmRename(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": "建议先开启预演模式执行一次，"
-                                            "确认日志里的改名结果正确后，再关闭预演模式。"
-                                            "支持 001.strm、E01.strm、1.1080p.strm；"
-                                            "如果父目录是 S01/Season 1，会用上一级目录作为剧名。"
-                                            "「用上级目录名重写标题」可把 Yi.Wu.Zhi.S01E22 "
-                                            "改成父目录中文名（保留 S01E22）；"
-                                            "「删除垃圾 STRM」会按关键字删掉广告引流文件，"
-                                            "请务必先预演确认再实删。"
+                                            "text": "默认只重命名 MP 无法识别的「裸集号」文件"
+                                            "（如 04.strm、E01.strm、第1集.strm），"
+                                            "用清洗后的上级目录名补成 剧名.S01E04。"
+                                            "已含 SxxExx 的规范文件默认不动。"
+                                            "「用上级目录名重写标题」仅对纯拼音/英文标题"
+                                            "（如 Yi.Wu.Zhi.S01E22）生效，且父目录需为干净中文名，"
+                                            "已含中文标题的文件会跳过，避免改脏。"
+                                            "「删除垃圾 STRM」按关键字删广告引流文件。"
+                                            "可用「日期过滤」只处理最近改动的文件，保护老内容。"
+                                            "强烈建议先开预演、看明细报告确认无误，再关预演执行。"
                                         },
                                     }
                                 ],
@@ -548,6 +645,8 @@ class StrmRename(_PluginBase):
             "touch_mtime": True,
             "clean_junk": False,
             "junk_keywords": "",
+            "recent_days": 0,
+            "after_date": "",
             "template": "{title}.S{season:02d}E{episode:02d}{tail}.strm",
             "cron": "",
         }
