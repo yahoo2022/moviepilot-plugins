@@ -32,7 +32,7 @@ class StrmRename(_PluginBase):
     plugin_name = "STRM 剧集重命名助手"
     plugin_desc = "按上级目录名把纯数字 STRM 重命名为电视剧友好的 SxxExx 格式"
     plugin_icon = "edit.png"
-    plugin_version = "2.0.0"
+    plugin_version = "2.1.0"
     plugin_author = "ahnuchen"
     author_url = "https://github.com/ahnuchen"
     plugin_config_prefix = "strmrename_"
@@ -56,6 +56,7 @@ class StrmRename(_PluginBase):
     _recent_days: int = 0               # 只处理最近 N 天内改动的文件，0=全量
     _after_date: str = ""               # 只处理此日期(含)之后改动的文件，YYYY-MM-DD，优先于 recent_days
     _keep_reports: int = 10             # 保留最近 N 份执行报告，0=不清理
+    _container: str = "moviepilot-v2"   # MP 容器名，用于生成 docker cp 拷贝命令
     _template: str = "{title}.S{season:02d}E{episode:02d}{tail}.strm"
     _cron: str = ""
     _scheduler: Optional[BackgroundScheduler] = None
@@ -96,6 +97,7 @@ class StrmRename(_PluginBase):
             self._recent_days = int(config.get("recent_days") or 0)
             self._after_date = (config.get("after_date") or "").strip()
             self._keep_reports = int(config.get("keep_reports") if config.get("keep_reports") is not None else 10)
+            self._container = (config.get("container") or "moviepilot-v2").strip()
             self._template = (
                 config.get("template")
                 or "{title}.S{season:02d}E{episode:02d}{tail}.strm"
@@ -135,6 +137,7 @@ class StrmRename(_PluginBase):
             "recent_days": self._recent_days,
             "after_date": self._after_date,
             "keep_reports": self._keep_reports,
+            "container": self._container,
             "template": self._template,
             "cron": self._cron,
         }
@@ -266,6 +269,13 @@ class StrmRename(_PluginBase):
         self._log_deletions(deleted_junk)
         if deleted_junk:
             msg += f"\n已删除 {len(deleted_junk)} 个垃圾，记录于 deleted_junk.log"
+        # 末尾附上现成的下载命令，跑完直接复制即可
+        if report_path:
+            cp_cmd = f"docker cp {self._container}:{report_path} ./"
+            msg += f"\n\n下载本次报告（直接复制）：\n{cp_cmd}"
+            if deleted_junk:
+                log_path = str(Path(self.get_data_path()) / "deleted_junk.log")
+                msg += f"\ndocker cp {self._container}:{log_path} ./"
         logger.info(f"[{self.plugin_name}] {msg}")
         self._send_notify("执行完成", msg)
 
@@ -733,6 +743,9 @@ class StrmRename(_PluginBase):
                             self._col(6, "VTextField", "keep_reports",
                                       "保留最近 N 份执行报告 (0=不清理)",
                                       placeholder="10"),
+                            self._col(6, "VTextField", "container",
+                                      "MP 容器名 (用于生成下载命令)",
+                                      placeholder="moviepilot-v2"),
                         ],
                     },
                     {
@@ -789,6 +802,7 @@ class StrmRename(_PluginBase):
             "recent_days": 0,
             "after_date": "",
             "keep_reports": 10,
+            "container": "moviepilot-v2",
             "template": "{title}.S{season:02d}E{episode:02d}{tail}.strm",
             "cron": "",
         }
