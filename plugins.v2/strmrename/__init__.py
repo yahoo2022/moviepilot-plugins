@@ -32,7 +32,7 @@ class StrmRename(_PluginBase):
     plugin_name = "STRM 剧集重命名助手"
     plugin_desc = "按上级目录名把纯数字 STRM 重命名为电视剧友好的 SxxExx 格式"
     plugin_icon = "edit.png"
-    plugin_version = "1.4.0"
+    plugin_version = "1.5.0"
     plugin_author = "ahnuchen"
     author_url = "https://github.com/ahnuchen"
     plugin_config_prefix = "strmrename_"
@@ -52,6 +52,7 @@ class StrmRename(_PluginBase):
     _force_parent_title: bool = False   # 已含 SxxExx 但用上级目录名重写标题（救拼音名）
     _touch_mtime: bool = True           # 改名后刷新 mtime，便于增量整理捡到
     _clean_junk: bool = False           # 删除垃圾 .strm（更多原盘请访问 / 首发广告等）
+    _junk_only: bool = False            # 仅清理垃圾：只删垃圾，完全不做重命名
     _junk_keywords: str = ""            # 垃圾关键字，换行/逗号分隔
     _recent_days: int = 0               # 只处理最近 N 天内改动的文件，0=全量
     _after_date: str = ""               # 只处理此日期(含)之后改动的文件，YYYY-MM-DD，优先于 recent_days
@@ -92,6 +93,10 @@ class StrmRename(_PluginBase):
             self._force_parent_title = config.get("force_parent_title", False)
             self._touch_mtime = config.get("touch_mtime", True)
             self._clean_junk = config.get("clean_junk", False)
+            self._junk_only = config.get("junk_only", False)
+            # 仅清理垃圾模式下，强制开启垃圾清理，否则什么都不做
+            if self._junk_only:
+                self._clean_junk = True
             self._junk_keywords = config.get("junk_keywords") or ""
             self._recent_days = int(config.get("recent_days") or 0)
             self._after_date = (config.get("after_date") or "").strip()
@@ -131,6 +136,7 @@ class StrmRename(_PluginBase):
             "force_parent_title": self._force_parent_title,
             "touch_mtime": self._touch_mtime,
             "clean_junk": self._clean_junk,
+            "junk_only": self._junk_only,
             "junk_keywords": self._junk_keywords,
             "recent_days": self._recent_days,
             "after_date": self._after_date,
@@ -253,6 +259,11 @@ class StrmRename(_PluginBase):
                     else:
                         failed += 1
                         details.append(("JUNK", "junk", str(file_path), "删除失败"))
+                    continue
+                # 仅清理垃圾模式：不做任何重命名
+                if self._junk_only:
+                    skipped += 1
+                    reason_count["junk_only_skip"] = reason_count.get("junk_only_skip", 0) + 1
                     continue
                 ok, reason, extra = self._rename_one(file_path)
                 if ok:
@@ -636,6 +647,8 @@ class StrmRename(_PluginBase):
                                       "改名后刷新修改时间 (便于增量整理捡到)"),
                             self._col(6, "VSwitch", "clean_junk",
                                       "删除垃圾 STRM (广告/引流文件)"),
+                            self._col(6, "VSwitch", "junk_only",
+                                      "仅清理垃圾 (只删垃圾，不做任何重命名)"),
                         ],
                     },
                     {
@@ -710,6 +723,7 @@ class StrmRename(_PluginBase):
                                             "（如 Yi.Wu.Zhi.S01E22）生效，且父目录需为干净中文名，"
                                             "已含中文标题的文件会跳过，避免改脏。"
                                             "「删除垃圾 STRM」按关键字删广告引流文件。"
+                                            "「仅清理垃圾」只删垃圾、完全不改名，适合单独清库。"
                                             "可用「日期过滤」只处理最近改动的文件，保护老内容。"
                                             "强烈建议先开预演、看明细报告确认无误，再关预演执行。"
                                         },
@@ -734,6 +748,7 @@ class StrmRename(_PluginBase):
             "force_parent_title": False,
             "touch_mtime": True,
             "clean_junk": False,
+            "junk_only": False,
             "junk_keywords": "",
             "recent_days": 0,
             "after_date": "",
