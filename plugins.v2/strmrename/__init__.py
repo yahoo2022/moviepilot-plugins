@@ -32,7 +32,7 @@ class StrmRename(_PluginBase):
     plugin_name = "STRM 剧集重命名助手"
     plugin_desc = "按上级目录名把纯数字 STRM 重命名为电视剧友好的 SxxExx 格式"
     plugin_icon = "edit.png"
-    plugin_version = "1.3.0"
+    plugin_version = "1.4.0"
     plugin_author = "ahnuchen"
     author_url = "https://github.com/ahnuchen"
     plugin_config_prefix = "strmrename_"
@@ -55,15 +55,24 @@ class StrmRename(_PluginBase):
     _junk_keywords: str = ""            # 垃圾关键字，换行/逗号分隔
     _recent_days: int = 0               # 只处理最近 N 天内改动的文件，0=全量
     _after_date: str = ""               # 只处理此日期(含)之后改动的文件，YYYY-MM-DD，优先于 recent_days
+    _keep_reports: int = 10             # 保留最近 N 份执行报告，0=不清理
     _template: str = "{title}.S{season:02d}E{episode:02d}{tail}.strm"
     _cron: str = ""
     _scheduler: Optional[BackgroundScheduler] = None
 
-    # 内置垃圾关键字（广告/引流型文件名片段）
+    # 内置垃圾关键字（广告/引流型 + 花絮/菜单/片头片尾等非正片碎文件）
+    # 注意：匹配是“忽略大小写的子串包含”，所以避免用 SP/PV/IV 这类过短词，
+    # 改用 [menu]、.NCOP. 等带分隔符的形式，防止误删正片。
     _DEFAULT_JUNK = (
-        "更多原盘请访问,更多高清,120帧全球首发,全球首发,请访问,扫码,关注公众号,"
-        "请关注,免费观看,在线观看,最新电影,高清影视,样片,测试文件,广告,sample,"
-        "www.,http,.com,.net,.cc,.me,.tv,.xyz"
+        # 广告/引流
+        "更多原盘请访问,更多高清,更多电影请访问,更多剧集,120帧全球首发,全球首发,"
+        "请访问,地址发布页,收藏不迷路,扫码,关注公众号,请关注,免费观看,在线观看,"
+        "公益影视,最新电影,高清影视,全站无广告,样片,测试文件,广告,sample,"
+        "www.,http,.com,.net,.cc,.me,.tv,.xyz,mp4kan,dygangs,5266ys,6v123,"
+        # 花絮/菜单/片头片尾/字幕附属等非正片碎文件（尽量用带括号/分隔符形式）
+        "[menu],特典,映像特典,音乐特典,花絮,预告片,creditless,"
+        "ncop,nced,ending ver,review ver,opening ver,preview ver,[sp],[pv],"
+        "[trailer],[logo],scans,fonts"
     )
 
     def init_plugin(self, config: dict = None):
@@ -86,6 +95,7 @@ class StrmRename(_PluginBase):
             self._junk_keywords = config.get("junk_keywords") or ""
             self._recent_days = int(config.get("recent_days") or 0)
             self._after_date = (config.get("after_date") or "").strip()
+            self._keep_reports = int(config.get("keep_reports") if config.get("keep_reports") is not None else 10)
             self._template = (
                 config.get("template")
                 or "{title}.S{season:02d}E{episode:02d}{tail}.strm"
@@ -124,6 +134,7 @@ class StrmRename(_PluginBase):
             "junk_keywords": self._junk_keywords,
             "recent_days": self._recent_days,
             "after_date": self._after_date,
+            "keep_reports": self._keep_reports,
             "template": self._template,
             "cron": self._cron,
         }
@@ -218,6 +229,7 @@ class StrmRename(_PluginBase):
         # 明细：(动作, 原因, 原路径, 目标/说明)
         details: List[Tuple[str, str, str, str]] = []
         reason_count: Dict[str, int] = {}
+        deleted_junk: List[str] = []  # 本次实际删除的垃圾，写入持久日志
 
         for file_path in files:
             scanned += 1
@@ -236,6 +248,8 @@ class StrmRename(_PluginBase):
                     if self._delete_junk(file_path):
                         junked += 1
                         details.append(("JUNK", "junk", str(file_path), "已删除"))
+                        if not self._dry_run:
+                            deleted_junk.append(str(file_path))
                     else:
                         failed += 1
                         details.append(("JUNK", "junk", str(file_path), "删除失败"))
@@ -274,6 +288,9 @@ class StrmRename(_PluginBase):
         report_path = self._write_report(mode, msg, details)
         if report_path:
             msg += f"\n明细已写入：{report_path}"
+        self._log_deletions(deleted_junk)
+        if deleted_junk:
+            msg += f"\n已删除 {len(deleted_junk)} 个垃圾，记录于 deleted_junk.log"
         logger.info(f"[{self.plugin_name}] {msg}")
         self._send_notify("执行完成", msg)
 
@@ -295,10 +312,42 @@ class StrmRename(_PluginBase):
             for action, reason, src, extra in details:
                 lines.append(f"{action}\t{reason}\t{src}\t{extra}")
             report.write_text("\n".join(lines), encoding="utf-8")
+            self._rotate_reports(Path(data_dir))
             return str(report)
         except Exception as e:
             logger.warning(f"[{self.plugin_name}] 写明细报告失败: {e}")
             return ""
+
+    def _rotate_reports(self, data_dir: Path):
+        """只保留最近 N 份 rename_report_*.txt，避免越积越多。0=不清理。"""
+        if not self._keep_reports or self._keep_reports <= 0:
+            return
+        try:
+            reports = sorted(
+                data_dir.glob("rename_report_*.txt"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for old in reports[self._keep_reports:]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        except Exception as e:
+            logger.warning(f"[{self.plugin_name}] 清理旧报告失败: {e}")
+
+    def _log_deletions(self, deleted: List[str]):
+        """把本次实际删除的垃圾文件追加写入持久日志（不随报告轮转丢失）。"""
+        if not deleted:
+            return
+        try:
+            log_file = Path(self.get_data_path()) / "deleted_junk.log"
+            ts = datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y-%m-%d %H:%M:%S")
+            with log_file.open("a", encoding="utf-8") as f:
+                for path in deleted:
+                    f.write(f"{ts}\t{path}\n")
+        except Exception as e:
+            logger.warning(f"[{self.plugin_name}] 写删除日志失败: {e}")
 
     def _rename_one(self, file_path: Path) -> Tuple[bool, str, str]:
         if file_path.suffix.lower() != ".strm":
@@ -391,8 +440,25 @@ class StrmRename(_PluginBase):
     def _looks_named(stem: str) -> bool:
         return bool(re.search(r"(?i)\bS\d{1,2}E\d{1,4}\b", stem))
 
+    @staticmethod
+    def _cn_num(s: str) -> int:
+        """简单中文数字转阿拉伯（支持 一~二十）。"""
+        digits = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+                  "六": 6, "七": 7, "八": 8, "九": 9}
+        if s == "十":
+            return 10
+        if s.startswith("十"):
+            return 10 + digits.get(s[1:], 0)
+        if s.endswith("十"):
+            return digits.get(s[:-1], 0) * 10
+        if "十" in s:
+            a, b = s.split("十", 1)
+            return digits.get(a, 0) * 10 + digits.get(b, 0)
+        return digits.get(s, 1)
+
     def _parse_episode(self, stem: str) -> Optional[Tuple[int, str, Optional[int]]]:
         text = stem.strip()
+        season: Optional[int] = None
 
         # 1) 中文“第N集/话” 优先
         match = re.match(r"^第\s*(?P<ep>\d{1,4})\s*[集话話]", text)
@@ -403,15 +469,31 @@ class StrmRename(_PluginBase):
             # 2) 必须以（可选 E）数字开头，且数字后紧跟分隔符或结束，
             #    避免把“21点”“2021某电影”这类标题当成集数。
             match = re.match(r"^[Ee]?(?P<ep>\d{1,4})(?=$|[.\s_\-\[\]【】()])", text)
-            if not match:
-                return None
-            episode = int(match.group("ep"))
-            rest = text[match.end():]
+            if match:
+                episode = int(match.group("ep"))
+                rest = text[match.end():]
+            else:
+                # 3) 标题前缀 + EPxx（如 Under.the.Moonlight.2025.EP14 / 黑帮领地.第一季.EP05）
+                #    同时尝试从文本里取“第N季”作为季号。
+                ep_match = re.search(r"(?i)\bEP\.?(?P<ep>\d{1,4})\b", text)
+                if not ep_match:
+                    return None
+                episode = int(ep_match.group("ep"))
+                rest = text[ep_match.end():]
+                smatch = re.search(r"第\s*(\d{1,2})\s*季", text) or \
+                    re.search(r"(?i)\bS(?:eason)?\.?(\d{1,2})\b", text)
+                if smatch:
+                    season = int(smatch.group(1))
+                else:
+                    # 中文数字季：第一季 / 第二季 ...
+                    cn = re.search(r"第\s*([一二三四五六七八九十]+)\s*季", text)
+                    if cn:
+                        season = self._cn_num(cn.group(1))
 
         if episode <= 0 or episode > self._max_episode:
             return None
 
-        return episode, self._extract_tail(rest), None
+        return episode, self._extract_tail(rest), season
 
     def _parse_named(self, stem: str) -> Optional[Tuple[int, str, Optional[int]]]:
         """从已含 SxxExx 的文件名里提取季、集，并把 SxxExx 之后的串当作 tail。
@@ -595,6 +677,14 @@ class StrmRename(_PluginBase):
                     {
                         "component": "VRow",
                         "content": [
+                            self._col(6, "VTextField", "keep_reports",
+                                      "保留最近 N 份执行报告 (0=不清理)",
+                                      placeholder="10"),
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
                             self._col(12, "VTextarea", "junk_keywords",
                                       "垃圾关键字 (换行或逗号分隔，留空用内置默认)",
                                       placeholder="更多原盘请访问\n120帧全球首发\n全球首发\nwww."),
@@ -647,6 +737,7 @@ class StrmRename(_PluginBase):
             "junk_keywords": "",
             "recent_days": 0,
             "after_date": "",
+            "keep_reports": 10,
             "template": "{title}.S{season:02d}E{episode:02d}{tail}.strm",
             "cron": "",
         }
