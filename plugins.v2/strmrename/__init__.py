@@ -32,7 +32,7 @@ class StrmRename(_PluginBase):
     plugin_name = "STRM 剧集重命名助手"
     plugin_desc = "按上级目录名把纯数字 STRM 重命名为电视剧友好的 SxxExx 格式"
     plugin_icon = "edit.png"
-    plugin_version = "2.2.0"
+    plugin_version = "2.3.0"
     plugin_author = "ahnuchen"
     author_url = "https://github.com/ahnuchen"
     plugin_config_prefix = "strmrename_"
@@ -428,8 +428,8 @@ class StrmRename(_PluginBase):
     def _parse_any_episode(self, stem: str) -> Optional[Tuple[int, str, Optional[int]]]:
         """按优先级从文件名提取集号(+可选季号)：
         SxxExx 的 E > EPxx > 第N集 > 番剧[NN] > 开头裸数字。"""
-        # 1) SxxExx —— 最高优先，季集都取文件名里的
-        m = re.search(r"(?i)\bS(?P<s>\d{1,2})E(?P<e>\d{1,4})\b", stem)
+        # 1) SxxExx / SxxEPxx —— 最高优先，季集都取文件名里的
+        m = re.search(r"(?i)\bS(?P<s>\d{1,2})EP?(?P<e>\d{1,4})\b", stem)
         if m:
             ep = int(m.group("e"))
             if 0 < ep <= self._max_episode:
@@ -511,6 +511,7 @@ class StrmRename(_PluginBase):
         # 3) 各种“标题 + 集号”格式，按优先级取第一个命中
         #    注意：EPxx / Exx 要排除年份(如 .2022.)，故 E 后≤3位且词边界
         patterns = [
+            r"(?i)\bS\d{1,2}EP?(?P<ep>\d{1,4})\b",           # S01E02 / S01EP02（连写）
             r"(?i)\bEP\.?(?P<ep>\d{1,4})\b",                 # EP14
             r"(?i)(?<![A-Za-z])E(?P<ep>\d{1,3})(?![0-9A-Za-z])",  # .E02. / E03（无S）
             r"(?i)\bEpisode\s*(?P<ep>\d{1,4})\b",            # Episode 56
@@ -527,7 +528,7 @@ class StrmRename(_PluginBase):
 
     def _guess_season(self, text: str) -> Optional[int]:
         """从文件名里猜季号：SxxExx 的 S / Sxx / 第N季 / 第二季 / 2nd Season。"""
-        m = re.search(r"(?i)\bS(\d{1,2})E\d{1,4}\b", text)
+        m = re.search(r"(?i)\bS(\d{1,2})EP?\d{1,4}\b", text)  # S01E02 / S01EP02
         if m:
             return int(m.group(1))
         m = re.search(r"第\s*(\d{1,2})\s*季", text)
@@ -676,9 +677,12 @@ class StrmRename(_PluginBase):
         t = re.sub(r"\[[^\]]*\]", " ", t)
         # 3) 去掉域名 www.xxx.com / xxx.net 等
         t = re.sub(r"(?i)\b(?:www\.)?[a-z0-9-]+\.(?:com|net|cc|me|tv|xyz|org|cn)\b", " ", t)
-        # 4) 在第一个“技术标记”处截断：季号/年份/清晰度/来源/编码
+        # 先去掉首尾分隔，避免开头空格让“1923”这类数字剧名被当年份截断
+        t = re.sub(r"\s+", " ", t).strip(" .-_·")
+        # 4) 在第一个“技术标记”处截断：季号/年份/清晰度/来源/编码。
+        #    用 (?<=.) 前瞻保证不在串首匹配，从而保留 1923/1899 这类纯数字剧名。
         cut = re.split(
-            r"(?i)(?:\.|\s|_)(?:S\d{1,2}(?:E\d+)?|Season\b|(?:19|20)\d{2}\b|"
+            r"(?i)(?<=.)(?:\.|\s|_)(?:S\d{1,2}(?:EP?\d+)?|Season\b|(?:19|20)\d{2}\b|"
             r"2160p|1080p|1080i|720p|576p|480p|4k|8k|uhd|hdr|web-?dl|webrip|"
             r"bluray|blu-ray|remux|hdtv|x264|x265|h\.?264|h\.?265|hevc|"
             r"60fps|10bit)",
