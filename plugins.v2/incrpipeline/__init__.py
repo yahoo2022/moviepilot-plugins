@@ -431,6 +431,8 @@ class IncrPipeline(_PluginBase):
                 timed_out = True
                 break
             cur = stack.pop()
+            # 先 GET 当前目录，触发 Strm 驱动为该目录生成 strm 文件
+            self._get_path(cur)
             ok, entries, err = self._list_dir(cur)
             if not ok:
                 logger.warning(f"[{self.plugin_name}] 列目录失败（已重试）{cur}: {err}")
@@ -494,6 +496,27 @@ class IncrPipeline(_PluginBase):
         except Exception:
             return None
 
+    def _get_path(self, path: str) -> bool:
+        """调用 /api/fs/get 触发 OpenList Strm 驱动为该路径生成 strm 文件。"""
+        url = f"{self._openlist_url}/api/fs/get"
+        headers = {
+            "Authorization": self._openlist_token,
+            "Content-Type": "application/json",
+        }
+        try:
+            resp = requests.post(url, headers=headers,
+                                 json={"path": path, "refresh": False},
+                                 timeout=30)
+            resp.raise_for_status()
+            data = resp.json() or {}
+            ok = data.get("code") == 200
+            if not ok:
+                logger.warning(f"[{self.plugin_name}] get {path} 返回 {data.get('code')}: {data.get('message')}")
+            return ok
+        except Exception as e:
+            logger.warning(f"[{self.plugin_name}] get {path} 异常: {e}")
+            return False
+
     def _list_dir(self, path: str) -> Tuple[bool, List[dict], str]:
         url = f"{self._openlist_url}/api/fs/list"
         headers = {
@@ -518,7 +541,7 @@ class IncrPipeline(_PluginBase):
                 raw_data = data.get("data") or {}
                 content = raw_data.get("content") or []
                 total = raw_data.get("total", "?")
-                logger.debug(f"[{self.plugin_name}] 列目录 {path} 返回 total={total} content={len(content)} 条")
+                logger.info(f"[{self.plugin_name}] 列目录 {path} 返回 total={total} content={len(content)} 条")
                 return True, content, ""
             except Exception as e:
                 last_err = str(e)
@@ -529,6 +552,7 @@ class IncrPipeline(_PluginBase):
                     time.sleep(attempt * 2)
                     continue
         return False, [], last_err
+
 
     # ---------- 第三步：Emby 媒体库扫描 ----------
 
