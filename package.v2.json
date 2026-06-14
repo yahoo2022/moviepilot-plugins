@@ -49,11 +49,12 @@
     "name": "STRM 剧集重命名助手",
     "description": "按上级目录名重命名 STRM 为 SxxExx，可重写拼音标题、刷新 mtime、清理垃圾文件",
     "labels": "工具",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "icon": "edit.png",
     "author": "ahnuchen",
     "level": 1,
     "history": {
+      "v1.2.0": "新增：每次执行把明细（含跳过原因）写入插件数据目录便于下载排查；通知里加跳过原因分布",
       "v1.1.0": "新增：用上级目录名重写拼音标题、改名后刷新 mtime、按关键字清理垃圾 STRM；优化集数解析（容忍中文水印后缀）",
       "v1.0.0": "初始版本：支持预演、递归扫描、SxxExx 模板、远程命令/Webhook/Cron"
     }

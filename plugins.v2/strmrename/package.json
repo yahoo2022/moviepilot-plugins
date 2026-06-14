@@ -2,7 +2,7 @@
   "id": "StrmRename",
   "name": "STRM 剧集重命名助手",
   "description": "按上级目录名重命名 STRM 为 SxxExx，可重写拼音标题、刷新 mtime、清理垃圾文件",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "ahnuchen",
   "author_url": "https://github.com/yahoo2022",
   "icon": "edit.png",

@@ -32,7 +32,7 @@ class StrmRename(_PluginBase):
     plugin_name = "STRM 剧集重命名助手"
     plugin_desc = "按上级目录名把纯数字 STRM 重命名为电视剧友好的 SxxExx 格式"
     plugin_icon = "edit.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "ahnuchen"
     author_url = "https://github.com/ahnuchen"
     plugin_config_prefix = "strmrename_"
@@ -194,6 +194,9 @@ class StrmRename(_PluginBase):
 
         files = root.rglob("*.strm") if self._recursive else root.glob("*.strm")
         scanned = renamed = skipped = conflicts = failed = junked = 0
+        # 明细：(动作, 原因, 原路径, 目标/说明)
+        details: List[Tuple[str, str, str, str]] = []
+        reason_count: Dict[str, int] = {}
 
         for file_path in files:
             scanned += 1
@@ -202,29 +205,68 @@ class StrmRename(_PluginBase):
                 if self._clean_junk and self._is_junk(file_path):
                     if self._delete_junk(file_path):
                         junked += 1
+                        details.append(("JUNK", "junk", str(file_path), "已删除"))
+                    else:
+                        failed += 1
+                        details.append(("JUNK", "junk", str(file_path), "删除失败"))
                     continue
-                ok, reason = self._rename_one(file_path)
+                ok, reason, extra = self._rename_one(file_path)
                 if ok:
                     renamed += 1
+                    details.append(("RENAME", reason, str(file_path), extra))
                 elif reason == "conflict":
                     conflicts += 1
+                    details.append(("SKIP", reason, str(file_path), extra))
                 else:
                     skipped += 1
+                    reason_count[reason] = reason_count.get(reason, 0) + 1
+                    details.append(("SKIP", reason, str(file_path), extra))
             except Exception as e:
                 failed += 1
+                details.append(("ERROR", "exception", str(file_path), str(e)))
                 logger.error(f"[{self.plugin_name}] 处理失败: {file_path} - {e}")
 
         mode = "预演" if self._dry_run else "实际执行"
+        # 跳过原因分布，帮助判断“为什么没扫到垃圾/没改名”
+        skip_brief = "，".join(f"{k}:{v}" for k, v in sorted(
+            reason_count.items(), key=lambda x: -x[1])) or "无"
         msg = (
             f"{mode}完成：扫描 {scanned}，重命名 {renamed}，"
             f"清理垃圾 {junked}，跳过 {skipped}，冲突 {conflicts}，失败 {failed}"
+            f"\n跳过原因分布：{skip_brief}"
         )
+        report_path = self._write_report(mode, msg, details)
+        if report_path:
+            msg += f"\n明细已写入：{report_path}"
         logger.info(f"[{self.plugin_name}] {msg}")
         self._send_notify("执行完成", msg)
 
-    def _rename_one(self, file_path: Path) -> Tuple[bool, str]:
+    def _write_report(self, mode: str, summary: str,
+                       details: List[Tuple[str, str, str, str]]) -> str:
+        """把本次明细写到插件数据目录，便于 docker cp 下载查看。"""
+        try:
+            data_dir = self.get_data_path()
+            ts = datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y%m%d_%H%M%S")
+            report = Path(data_dir) / f"rename_report_{ts}.txt"
+            lines = [
+                f"# STRM 重命名报告 ({mode})",
+                f"# 时间: {ts}",
+                f"# 扫描目录: {self._root_path}",
+                f"# {summary.splitlines()[0]}",
+                "",
+                "动作\t原因\t原路径\t目标/说明",
+            ]
+            for action, reason, src, extra in details:
+                lines.append(f"{action}\t{reason}\t{src}\t{extra}")
+            report.write_text("\n".join(lines), encoding="utf-8")
+            return str(report)
+        except Exception as e:
+            logger.warning(f"[{self.plugin_name}] 写明细报告失败: {e}")
+            return ""
+
+    def _rename_one(self, file_path: Path) -> Tuple[bool, str, str]:
         if file_path.suffix.lower() != ".strm":
-            return False, "not_strm"
+            return False, "not_strm", ""
 
         already_named = self._looks_named(file_path.stem)
 
@@ -232,19 +274,19 @@ class StrmRename(_PluginBase):
         # （专治 Yi.Wu.Zhi.S01E22 这类拼音命名，把标题换成父目录中文名）
         if already_named and not self._force_parent_title:
             if self._skip_existing_named:
-                return False, "already_named"
+                return False, "already_named", ""
 
         if already_named:
             parsed = self._parse_named(file_path.stem)
         else:
             parsed = self._parse_episode(file_path.stem)
         if not parsed:
-            return False, "not_episode"
+            return False, "not_episode", "未识别出集数"
         episode, tail, parsed_season = parsed
 
         title, season = self._title_and_season(file_path.parent)
         if not title:
-            return False, "no_title"
+            return False, "no_title", "上级目录名为空"
         # 从原文件名解析到的季优先（如 S02E05 保留 S02）
         if parsed_season is not None:
             season = parsed_season
@@ -261,12 +303,12 @@ class StrmRename(_PluginBase):
         target = file_path.with_name(new_name)
 
         if target == file_path:
-            return False, "same"
+            return False, "same", "新旧文件名一致"
         if target.exists():
             logger.warning(
                 f"[{self.plugin_name}] 目标已存在，跳过: {file_path} -> {target}"
             )
-            return False, "conflict"
+            return False, "conflict", new_name
 
         if self._dry_run:
             logger.info(f"[{self.plugin_name}] [预演] {file_path} -> {target}")
@@ -278,7 +320,7 @@ class StrmRename(_PluginBase):
                     os.utime(target, None)
                 except OSError as e:
                     logger.warning(f"[{self.plugin_name}] 刷新 mtime 失败 {target}: {e}")
-        return True, "renamed"
+        return True, "renamed", new_name
 
     # 清晰度/来源等“干净”后缀标记，只有这些会被保留进文件名 tail
     _QUALITY_RE = re.compile(
