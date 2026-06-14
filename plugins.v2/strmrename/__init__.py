@@ -32,7 +32,7 @@ class StrmRename(_PluginBase):
     plugin_name = "STRM 剧集重命名助手"
     plugin_desc = "按上级目录名把纯数字 STRM 重命名为电视剧友好的 SxxExx 格式"
     plugin_icon = "edit.png"
-    plugin_version = "2.1.0"
+    plugin_version = "2.2.0"
     plugin_author = "ahnuchen"
     author_url = "https://github.com/ahnuchen"
     plugin_config_prefix = "strmrename_"
@@ -493,48 +493,61 @@ class StrmRename(_PluginBase):
 
     def _parse_episode(self, stem: str) -> Optional[Tuple[int, str, Optional[int]]]:
         text = stem.strip()
-        season: Optional[int] = None
+        season: Optional[int] = self._guess_season(text)
 
         # 1) 中文“第N集/话” 优先
         match = re.match(r"^第\s*(?P<ep>\d{1,4})\s*[集话話]", text)
         if match:
             episode = int(match.group("ep"))
             rest = text[match.end():]
-        else:
-            # 2) 必须以（可选 E）数字开头，且数字后紧跟分隔符或结束，
-            #    避免把“21点”“2021某电影”这类标题当成集数。
-            match = re.match(r"^[Ee]?(?P<ep>\d{1,4})(?=$|[.\s_\-\[\]【】()])", text)
-            if match:
-                episode = int(match.group("ep"))
-                rest = text[match.end():]
-            else:
-                # 3) 标题前缀 + EPxx（如 Under.the.Moonlight.2025.EP14 / 黑帮领地.第一季.EP05）
-                #    同时尝试从文本里取“第N季”作为季号。
-                ep_match = re.search(r"(?i)\bEP\.?(?P<ep>\d{1,4})\b", text)
-                if not ep_match:
-                    # 4) 番剧方括号集号：[DBD-Raws][Ao no Hako][19][1080P]... -> 19
-                    #    取第一个“纯数字方括号”作为集号（[1080P] 含字母不算）。
-                    br = re.search(r"\[(\d{1,3})\]", text)
-                    if not br:
-                        return None
-                    episode = int(br.group(1))
-                    rest = text[br.end():]
-                else:
-                    episode = int(ep_match.group("ep"))
-                    rest = text[ep_match.end():]
-                    smatch = re.search(r"第\s*(\d{1,2})\s*季", text) or \
-                        re.search(r"(?i)\bS(?:eason)?\.?(\d{1,2})\b", text)
-                    if smatch:
-                        season = int(smatch.group(1))
-                    else:
-                        # 中文数字季：第一季 / 第二季 ...
-                        cn = re.search(r"第\s*([一二三四五六七八九十]+)\s*季", text)
-                        if cn:
-                            season = self._cn_num(cn.group(1))
+            return self._finish(episode, rest, season)
 
+        # 2) 以（可选 E）数字开头：001 / E01 / 1.1080p
+        match = re.match(r"^[Ee]?(?P<ep>\d{1,4})(?=$|[.\s_\-\[\]【】()])", text)
+        if match:
+            episode = int(match.group("ep"))
+            return self._finish(episode, text[match.end():], season)
+
+        # 3) 各种“标题 + 集号”格式，按优先级取第一个命中
+        #    注意：EPxx / Exx 要排除年份(如 .2022.)，故 E 后≤3位且词边界
+        patterns = [
+            r"(?i)\bEP\.?(?P<ep>\d{1,4})\b",                 # EP14
+            r"(?i)(?<![A-Za-z])E(?P<ep>\d{1,3})(?![0-9A-Za-z])",  # .E02. / E03（无S）
+            r"(?i)\bEpisode\s*(?P<ep>\d{1,4})\b",            # Episode 56
+            r"\[(?P<ep>\d{1,3})\]",                          # 番剧 [19]
+            r"(?:\s|^)-\s*(?P<ep>\d{1,3})(?=\s|\[|$)",       # - 11  /  - 04 [
+            r"\s(?P<ep>\d{1,3})(?=\s*[\[(])",                # 坂本日常 16 [1080P]
+        ]
+        for pat in patterns:
+            m = re.search(pat, text)
+            if m:
+                episode = int(m.group("ep"))
+                return self._finish(episode, text[m.end():], season)
+        return None
+
+    def _guess_season(self, text: str) -> Optional[int]:
+        """从文件名里猜季号：SxxExx 的 S / Sxx / 第N季 / 第二季 / 2nd Season。"""
+        m = re.search(r"(?i)\bS(\d{1,2})E\d{1,4}\b", text)
+        if m:
+            return int(m.group(1))
+        m = re.search(r"第\s*(\d{1,2})\s*季", text)
+        if m:
+            return int(m.group(1))
+        m = re.search(r"第\s*([一二三四五六七八九十]+)\s*季", text)
+        if m:
+            return self._cn_num(m.group(1))
+        m = re.search(r"(?i)\bS(?:eason\s*)?(\d{1,2})\b", text)
+        if m:
+            return int(m.group(1))
+        m = re.search(r"(?i)\b(\d{1,2})(?:nd|rd|th|st)\s+Season\b", text)
+        if m:
+            return int(m.group(1))
+        return None
+
+    def _finish(self, episode: int, rest: str,
+                season: Optional[int]) -> Optional[Tuple[int, str, Optional[int]]]:
         if episode <= 0 or episode > self._max_episode:
             return None
-
         return episode, self._extract_tail(rest), season
 
     def _extract_tail(self, rest: str) -> str:
@@ -559,31 +572,46 @@ class StrmRename(_PluginBase):
 
     def _has_episode_marker(self, stem: str) -> bool:
         """文件名里是否带可识别的剧集/集号标记。带的一律不当垃圾，避免误删真内容。"""
-        if self._looks_named(stem):                       # SxxExx
+        return self._parse_episode(stem) is not None
+
+    @staticmethod
+    def _has_real_content(stem: str) -> bool:
+        """是否“看起来是正片”（电影也算）：含年份(19xx/20xx)或清晰度(1080p/2160p/4K)。
+        用于电影目录——带年份/清晰度的即便文件名里有站点水印也是真电影，不删。"""
+        if re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", stem):
             return True
-        if re.search(r"(?i)\bEP\.?\d{1,4}\b", stem):       # EPxx
-            return True
-        if re.search(r"第\s*\d{1,4}\s*[集话話]", stem):     # 第N集/话
-            return True
-        if re.search(r"\[\d{1,4}\]", stem):                # 番剧 [19]
+        if re.search(r"(?i)\b(?:2160p|1080p|1080i|720p|576p|480p|4k|8k|uhd)\b", stem):
             return True
         return False
 
     def _is_junk(self, file_path: Path) -> bool:
         """是否广告/引流/花絮垃圾。
 
-        安全第一：只要文件名带集号标记（SxxExx / EPxx / 第N集 / [NN]），
-        就认定它是真内容、绝不当垃圾——哪怕名字里还带广告词（那种交给改名去清广告）。
+        安全铁律（任一成立即“真内容”，绝不删）：
+          - 带集号标记（SxxExx / EPxx / Exx / 第N集 / 番剧[NN] / Episode N / - NN ...）；
+          - 带年份或清晰度（电影正片，即便带站点水印，如 大室家.1080p...dygangs.me）。
 
         判垃圾的两个独立条件（满足其一即垃圾）：
-          1. 命中广告/花絮关键字；
-          2. 开启「无数字即垃圾」时，文件名完全不含任何数字（剧集/电影正片几乎都含
-             年份或分辨率或集号，纯广告页常无数字，如「更多剧集打包下载请访问」）。
+          1. 命中广告/花絮关键字，且不是上面的真内容；
+          2. 开启「无数字即垃圾」时，文件名完全不含任何数字。
+        花絮例外：含 [menu]/特典/花絮/Ver. 等花絮标记的，即便有年份也按垃圾删。
         """
         stem = file_path.stem
-        if self._has_episode_marker(stem):
-            return False
         name = file_path.name.lower()
+
+        # 花絮/菜单/片头片尾：明确的非正片，优先判垃圾（即便带年份/清晰度）
+        extras = ("[menu]", "映像特典", "音乐特典", "花絮", "预告片", "creditless",
+                  ".ncop.", ".nced.", "ending ver", "review ver", "opening ver",
+                  "preview ver", "[sp]", "[pv]", "[trailer]", "[logo]")
+        for ex in extras:
+            if ex in name:
+                return True
+
+        # 真内容保护
+        if self._has_episode_marker(stem) or self._has_real_content(stem):
+            return False
+
+        # 剩下的：无集号、无年份/清晰度
         for kw in self._junk_kw_list():
             if kw.lower() in name:
                 return True
@@ -612,19 +640,32 @@ class StrmRename(_PluginBase):
         番剧：[DBD-Raws][青之箱][01-25TV全集+特典映像][1080P]... -> 青之箱
         """
         # 番剧式：整名由多个 [..] 块组成，剧名也在某个方括号里。
-        # 先尝试从方括号块里挑一个“含中文、且不是发布组/技术标记”的作为剧名。
+        # 从方括号块里挑第一个“不是发布组/技术/集数范围”的块作为剧名（中/英都可）。
         if title.lstrip().startswith("["):
             blocks = re.findall(r"\[([^\]]*)\]", title)
+            # 已知发布组/字幕组名（整块等于这些则跳过）
+            groups = {"dbd-raws", "vcb-studio", "nekomoe kissaten", "milks",
+                      "lolihouse", "fyy raws", "bonobosubs", "toc", "ани",
+                      "ohys-raws", "lilith-raws", "skymoon-raws", "ave"}
             for b in blocks:
                 b = b.strip()
-                # 跳过发布组、纯英文、含明显技术/集数标记的块
-                if not re.search(r"[\u4e00-\u9fff]", b):
+                low = b.lower()
+                if not b:
                     continue
-                if re.search(r"(?i)(raws|rip|x26|hevc|flac|aac|bit|TV全集|"
-                             r"全集|特典|字幕|外挂|\d{3,4}p|menu)", b):
+                if low in groups:
                     continue
-                # 去掉块内可能的“第N季”等季信息后返回
+                # 跳过含技术/集数范围/花絮标记的块
+                if re.search(r"(?i)(raws|rip|studio|subs|\d{3,4}p|x26|hevc|avc|"
+                             r"flac|aac|ac-3|e-ac|10bit|8bit|web-?dl|bdrip|"
+                             r"全集|特典|字幕|外挂|双语|menu|mkv|mp4|hi10p|ma10p|"
+                             r"\d{1,3}\s*-\s*\d{1,3}|bilibili|webrip|hdr|dovi)", b):
+                    continue
+                # 跳过纯数字块（那是集号 [19]）
+                if re.fullmatch(r"\d{1,4}", b):
+                    continue
                 cand = re.sub(r"\s+", " ", b).strip(" .-_·")
+                # 去掉块尾的季标记，如 "Ranma ½ (2024) S1" -> 截断在 S1/年份前
+                cand = re.split(r"(?i)\s+S\d{1,2}\b|\s*\((?:19|20)\d{2}\)", cand)[0].strip()
                 if cand:
                     return cand
 
