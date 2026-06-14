@@ -6,7 +6,7 @@
 |---|---|---|
 | `plugins.v2/incrpipeline/` | 增量入库流水线 | 一次触发顺序执行 OpenList 扫描生成 STRM + 增量整理刮削，两步各有独立开关 |
 | `plugins.v2/openlistscan/` | OpenList 扫描触发器 | 一键触发 OpenList 扫描 + MP 目录整理 |
-| `plugins.v2/strmrename/` | STRM 剧集重命名助手 | 裸集号 STRM 按上级目录名补成 SxxExx；支持拼音名重写、垃圾/花絮清理、日期增量、明细报告与删除日志 |
+| `plugins.v2/strmrename/` | STRM 剧集重命名助手 | 电视剧按一级目录名统一命名 SxxExx；电影只清垃圾；含集号铁律防误删 |
 | `plugins.v2/incrtransfer/` | 增量整理刮削 | 只整理最近 N 天新增/改动的媒体，支持电影/电视剧、复制/移动/链接/自动、目标路径与刮削 |
 
 > 仓库只面向 MoviePilot V2：索引为 `package.v2.json`，代码在 `plugins.v2/`。
