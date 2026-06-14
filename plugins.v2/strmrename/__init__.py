@@ -32,7 +32,7 @@ class StrmRename(_PluginBase):
     plugin_name = "STRM 剧集重命名助手"
     plugin_desc = "按上级目录名把纯数字 STRM 重命名为电视剧友好的 SxxExx 格式"
     plugin_icon = "edit.png"
-    plugin_version = "1.5.0"
+    plugin_version = "1.6.0"
     plugin_author = "ahnuchen"
     author_url = "https://github.com/ahnuchen"
     plugin_config_prefix = "strmrename_"
@@ -61,19 +61,19 @@ class StrmRename(_PluginBase):
     _cron: str = ""
     _scheduler: Optional[BackgroundScheduler] = None
 
-    # 内置垃圾关键字（广告/引流型 + 花絮/菜单/片头片尾等非正片碎文件）
-    # 注意：匹配是“忽略大小写的子串包含”，所以避免用 SP/PV/IV 这类过短词，
-    # 改用 [menu]、.NCOP. 等带分隔符的形式，防止误删正片。
+    # 内置垃圾关键字（只保留“整段广告短语 / 明确花絮标记”，绝不用裸 TLD/短词，
+    # 避免 Shine.on.Me、Always.Meet、The.Studio 这类正片名被子串误命中）。
+    # 关键安全保障：含 SxxExx / EPxx / [NN] 集号或 第N集 的文件一律不当垃圾（见 _is_junk）。
     _DEFAULT_JUNK = (
-        # 广告/引流
-        "更多原盘请访问,更多高清,更多电影请访问,更多剧集,120帧全球首发,全球首发,"
-        "请访问,地址发布页,收藏不迷路,扫码,关注公众号,请关注,免费观看,在线观看,"
-        "公益影视,最新电影,高清影视,全站无广告,样片,测试文件,广告,sample,"
-        "www.,http,.com,.net,.cc,.me,.tv,.xyz,mp4kan,dygangs,5266ys,6v123,"
-        # 花絮/菜单/片头片尾/字幕附属等非正片碎文件（尽量用带括号/分隔符形式）
-        "[menu],特典,映像特典,音乐特典,花絮,预告片,creditless,"
-        "ncop,nced,ending ver,review ver,opening ver,preview ver,[sp],[pv],"
-        "[trailer],[logo],scans,fonts"
+        # 广告/引流——用完整短语，不用裸域名
+        "更多原盘请访问,更多高清电影请访问,更多电视剧集下载请访问,更多剧集打包下载请访问,"
+        "更多高清剧集下载请访问,更多无水印,120帧全球首发,全球首发,地址发布页,收藏不迷路,"
+        "扫码关注,关注公众号,免费公益影视,公益影视站,全站无广告,样片,测试文件,"
+        "mp4kan.com,dygangs.me,dygang.me,5266ys.com,6v123.net,6v123.com,butailing.com,"
+        # 花絮/菜单/片头片尾/字幕附属（带括号或分隔符，避免误命中正片）
+        "[menu],映像特典,音乐特典,花絮,预告片,creditless,"
+        ".ncop.,.nced.,ending ver,review ver,opening ver,preview ver,[sp],[pv],"
+        "[trailer],[logo],[scans],[fonts]"
     )
 
     def init_plugin(self, config: dict = None):
@@ -488,18 +488,25 @@ class StrmRename(_PluginBase):
                 #    同时尝试从文本里取“第N季”作为季号。
                 ep_match = re.search(r"(?i)\bEP\.?(?P<ep>\d{1,4})\b", text)
                 if not ep_match:
-                    return None
-                episode = int(ep_match.group("ep"))
-                rest = text[ep_match.end():]
-                smatch = re.search(r"第\s*(\d{1,2})\s*季", text) or \
-                    re.search(r"(?i)\bS(?:eason)?\.?(\d{1,2})\b", text)
-                if smatch:
-                    season = int(smatch.group(1))
+                    # 4) 番剧方括号集号：[DBD-Raws][Ao no Hako][19][1080P]... -> 19
+                    #    取第一个“纯数字方括号”作为集号（[1080P] 含字母不算）。
+                    br = re.search(r"\[(\d{1,3})\]", text)
+                    if not br:
+                        return None
+                    episode = int(br.group(1))
+                    rest = text[br.end():]
                 else:
-                    # 中文数字季：第一季 / 第二季 ...
-                    cn = re.search(r"第\s*([一二三四五六七八九十]+)\s*季", text)
-                    if cn:
-                        season = self._cn_num(cn.group(1))
+                    episode = int(ep_match.group("ep"))
+                    rest = text[ep_match.end():]
+                    smatch = re.search(r"第\s*(\d{1,2})\s*季", text) or \
+                        re.search(r"(?i)\bS(?:eason)?\.?(\d{1,2})\b", text)
+                    if smatch:
+                        season = int(smatch.group(1))
+                    else:
+                        # 中文数字季：第一季 / 第二季 ...
+                        cn = re.search(r"第\s*([一二三四五六七八九十]+)\s*季", text)
+                        if cn:
+                            season = self._cn_num(cn.group(1))
 
         if episode <= 0 or episode > self._max_episode:
             return None
@@ -541,8 +548,28 @@ class StrmRename(_PluginBase):
                 kws.append(kw)
         return kws
 
+    def _has_episode_marker(self, stem: str) -> bool:
+        """文件名里是否带可识别的剧集/集号标记。带的一律不当垃圾，避免误删真内容。"""
+        if self._looks_named(stem):                       # SxxExx
+            return True
+        if re.search(r"(?i)\bEP\.?\d{1,4}\b", stem):       # EPxx
+            return True
+        if re.search(r"第\s*\d{1,4}\s*[集话話]", stem):     # 第N集/话
+            return True
+        if re.search(r"\[\d{1,4}\]", stem):                # 番剧 [19]
+            return True
+        return False
+
     def _is_junk(self, file_path: Path) -> bool:
-        """文件名（含后缀）命中任一垃圾关键字即视为广告/引流垃圾。"""
+        """是否广告/引流/花絮垃圾。
+
+        安全第一：只要文件名带集号标记（SxxExx / EPxx / 第N集 / [NN]），
+        就认定它是真内容、绝不当垃圾——哪怕名字里还带广告词（那种交给改名去清广告）。
+        只有“纯广告/纯花絮、没有任何集号”的文件才会被当垃圾删。
+        """
+        stem = file_path.stem
+        if self._has_episode_marker(stem):
+            return False
         name = file_path.name.lower()
         for kw in self._junk_kw_list():
             if kw.lower() in name:
@@ -579,9 +606,27 @@ class StrmRename(_PluginBase):
     def _clean_title(title: str) -> str:
         """把脏目录名清洗成干净剧名。
 
-        例：【高清剧集网发布 www.TTHDTT.com】狙击蝴蝶[全30集][国语配音+中文字幕].Sniper.Butterfly.S01.1080p.HamiVideo.WEB-DL.AAC2.0.H.264-BlackTV
+        例：【高清剧集网发布 www.TTHDTT.com】狙击蝴蝶[全30集][国语配音+中文字幕].Sniper.Butterfly.S01.1080p...
             -> 狙击蝴蝶
+        番剧：[DBD-Raws][青之箱][01-25TV全集+特典映像][1080P]... -> 青之箱
         """
+        # 番剧式：整名由多个 [..] 块组成，剧名也在某个方括号里。
+        # 先尝试从方括号块里挑一个“含中文、且不是发布组/技术标记”的作为剧名。
+        if title.lstrip().startswith("["):
+            blocks = re.findall(r"\[([^\]]*)\]", title)
+            for b in blocks:
+                b = b.strip()
+                # 跳过发布组、纯英文、含明显技术/集数标记的块
+                if not re.search(r"[\u4e00-\u9fff]", b):
+                    continue
+                if re.search(r"(?i)(raws|rip|x26|hevc|flac|aac|bit|TV全集|"
+                             r"全集|特典|字幕|外挂|\d{3,4}p|menu)", b):
+                    continue
+                # 去掉块内可能的“第N季”等季信息后返回
+                cand = re.sub(r"\s+", " ", b).strip(" .-_·")
+                if cand:
+                    return cand
+
         t = title
         # 1) 去掉【...】【...】整块（发布组/站点广告）
         t = re.sub(r"【[^】]*】", " ", t)
