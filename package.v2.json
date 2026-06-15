@@ -49,11 +49,12 @@
     "name": "STRM 剧集重命名助手",
     "description": "电视剧/电影分目录处理：剧集按一级目录名统一重命名为 SxxExx，电影只清垃圾",
     "labels": "工具",
-    "version": "2.3.0",
+    "version": "2.4.0",
     "icon": "edit.png",
     "author": "ahnuchen",
     "level": 1,
     "history": {
+      "v2.4.0": "修复番剧[字幕组] 剧名 [技术参数]结构(如 MagicStar/Girls Band Cry)取错标题问题：方括号外文字保留为整体候选；技术黑名单 cr/sub 等短词加词边界防误伤(如 Cry 不再被当 cr)；启发式优先策略保护现有正确结果，仅在启发式给空时用 anitopy/guessit 兜底",
       "v2.3.0": "支持 SxxEPxx 连写集号(如 Gannibal.S01EP02)；修复纯数字剧名(如 1923/1899)被当年份截断导致 no_title 的问题——年份截断不再作用于串首",
       "v2.2.0": "大幅提升集号识别：新增 Exx(无S)/Episode N/破折号 - N/空格集号；番剧标题提取支持纯英文剧名(如 Girls Band Cry)；电影目录垃圾判定加「含年份或清晰度=真电影」保护，避免带站点水印的真电影(如 大室家.1080p...dygangs.me)被误删；花絮(menu/特典/Ver.)即便带年份仍按垃圾删",
       "v2.1.0": "通知/日志结尾附上现成的 docker cp 下载命令(报告+删除日志)，跑完直接复制即可；新增 MP 容器名配置",

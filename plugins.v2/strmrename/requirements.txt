@@ -1,1 +1,2 @@
-
+anitopy>=2.1.1
+guessit>=3.8.0

@@ -27,12 +27,22 @@ from app.plugins import _PluginBase
 from app.schemas import NotificationType
 from app.schemas.types import EventType
 
+# 第三方解析库（强烈推荐安装：requirements.txt 已声明，MP 启用插件时会自动装）
+try:
+    import anitopy  # 番剧文件名解析（基于 Anitomy）
+except Exception:
+    anitopy = None  # type: ignore
+try:
+    from guessit import guessit  # 通用电影/电视剧文件名解析
+except Exception:
+    guessit = None  # type: ignore
+
 
 class StrmRename(_PluginBase):
     plugin_name = "STRM 剧集重命名助手"
     plugin_desc = "按上级目录名把纯数字 STRM 重命名为电视剧友好的 SxxExx 格式"
     plugin_icon = "edit.png"
-    plugin_version = "2.3.0"
+    plugin_version = "2.4.0"
     plugin_author = "ahnuchen"
     author_url = "https://github.com/ahnuchen"
     plugin_config_prefix = "strmrename_"
@@ -426,16 +436,50 @@ class StrmRename(_PluginBase):
         return True, "renamed", new_name
 
     def _parse_any_episode(self, stem: str) -> Optional[Tuple[int, str, Optional[int]]]:
-        """按优先级从文件名提取集号(+可选季号)：
-        SxxExx 的 E > EPxx > 第N集 > 番剧[NN] > 开头裸数字。"""
-        # 1) SxxExx / SxxEPxx —— 最高优先，季集都取文件名里的
+        """从文件名提取(集号, tail, 季号)。
+
+        策略：自研启发式优先（已稳定，覆盖 9000+ 条正确改名），
+        启发式失败时再用 guessit 兜底（救 SxxEPxx 连写、`Episode N` 等少数边角格式）。
+        """
+        # 1) 启发式：SxxExx/SxxEPxx 直接匹配 + _parse_episode 兜底各种集号格式
         m = re.search(r"(?i)\bS(?P<s>\d{1,2})EP?(?P<e>\d{1,4})\b", stem)
         if m:
             ep = int(m.group("e"))
             if 0 < ep <= self._max_episode:
                 return ep, self._extract_tail(stem[m.end():]), int(m.group("s"))
-        # 2) 其余格式走通用解析（EPxx / 第N集 / [NN] / 开头数字）
-        return self._parse_episode(stem)
+        result = self._parse_episode(stem)
+        if result:
+            return result
+        # 2) 启发式拿不到再用 guessit
+        if guessit is not None:
+            try:
+                g = dict(guessit(stem, {"type": "episode", "single_value": True}))
+                ep = g.get("episode")
+                if isinstance(ep, list):
+                    ep = ep[0] if ep else None
+                if isinstance(ep, int) and 0 < ep <= self._max_episode:
+                    season = g.get("season")
+                    if isinstance(season, list):
+                        season = season[0] if season else None
+                    if isinstance(season, int) and season > 50:
+                        season = None
+                    return ep, self._extract_tail_after(stem, ep), \
+                        season if isinstance(season, int) else None
+            except Exception as e:
+                logger.debug(f"[{self.plugin_name}] guessit 解析失败: {e}")
+        return None
+
+    def _extract_tail_after(self, stem: str, ep: int) -> str:
+        """在文件名里定位集号位置后，提取尾部清晰度等标记。"""
+        # 找最后一个出现集号的位置（避免年份/分辨率干扰），定位 SxxExx/EPxx/Exx/[NN]/-NN
+        ep_str = str(ep)
+        ep2 = f"{ep:02d}"
+        for pat in (rf"(?i)S\d{{1,2}}EP?{ep2}\b", rf"(?i)\bEP?\.?{ep2}\b",
+                    rf"(?i)\bEpisode\s*{ep_str}\b", rf"\[{ep_str}\]", rf"\[{ep2}\]"):
+            m = re.search(pat, stem)
+            if m:
+                return self._extract_tail(stem[m.end():])
+        return ""
 
     def _top_title_and_season(self, file_path: Path, root: Path) -> Tuple[str, int]:
         """剧名取「相对扫描根的一级目录」；若一级目录下还有 S01/第二季 这类季目录，
@@ -632,43 +676,120 @@ class StrmRename(_PluginBase):
             logger.error(f"[{self.plugin_name}] 删除垃圾失败 {file_path}: {e}")
             return False
 
+    # 番剧片段里要排除的“非剧名”特征（发布组/技术/集数范围/花絮）
+    _ANIME_SKIP_RE = re.compile(
+        r"(?i)(raws|rip\b|studio|subs?\b|fansub|\d{3,4}p|x26[45]|hevc|avc|"
+        r"flac|aac|ac-3|e-ac|opus|10bit|8bit|web-?dl|webrip|bdrip|bluray|"
+        r"全集|特典|字幕|外挂|双语|menu|\bmkv\b|\bmp4\b|hi10p|ma10p|"
+        r"bilibili|baha|b-global|\bcr\b|hdr|dovi|remux|\bMAX\b|\bNF\b|"
+        r"\beng\b|\bchs\b|\bcht\b|\bjpn\b|\bjp\b|\bgb\b|\bbig5\b|"
+        r"\bSP\b|\bOVA\b|\bCM\b)")
+
+    @staticmethod
+    def _pick_anime_title(title: str) -> str:
+        """番剧目录名挑剧名：剧名可能在 [..] 块内或块外文字里。
+        把方括号块和块外文字都拆成候选，过滤发布组/技术标记，按
+        「含中文 > 多词(含空格) > 越长」打分选最优。
+        """
+        # 方括号块
+        blocks = re.findall(r"\[([^\]]*)\]", title)
+        # 块外文字：把 [..] 替换为分隔符，保留连续片段为一个候选
+        # 这样 "[MagicStar] Baby Walkure Everyday! [WEBDL]" 的外部就是 "Baby Walkure Everyday!"，
+        # 而不是被空格切成 Baby/Walkure/Everyday! 三个单词
+        outside = re.sub(r"\[[^\]]*\]", "|", title)
+        outside_parts = [p.strip() for p in outside.split("|") if p.strip()]
+        candidates = [b.strip() for b in blocks] + outside_parts
+
+        best = ""
+        best_score = (-1, -1, -1)
+        for c in candidates:
+            if not c:
+                continue
+            if re.fullmatch(r"\d{1,4}", c):           # 纯数字=集号
+                continue
+            if re.fullmatch(r"[\d.\-_]+", c):          # 纯数字/分隔
+                continue
+            if StrmRename._ANIME_SKIP_RE.search(c):
+                continue
+            # 去掉块尾季/年份标记：Ranma ½ (2024) S1 -> Ranma ½
+            c2 = re.split(r"(?i)\s+S\d{1,2}\b|\s*\((?:19|20)\d{2}\)|\s+\d{1,3}-\d{1,3}\b", c)[0]
+            c2 = re.sub(r"\s+", " ", c2).strip(" .-_·!&")
+            if not c2 or len(c2) < 2:
+                continue
+            has_cjk = 1 if re.search(r"[\u4e00-\u9fff]", c2) else 0
+            multiword = 1 if (" " in c2 or has_cjk) else 0
+            score = (has_cjk, multiword, len(c2))
+            if score > best_score:
+                best_score = score
+                best = c2
+        return best
+
     @staticmethod
     def _clean_title(title: str) -> str:
-        """把脏目录名清洗成干净剧名。
+        """清洗目录名为剧名。
 
-        例：【高清剧集网发布 www.TTHDTT.com】狙击蝴蝶[全30集][国语配音+中文字幕].Sniper.Butterfly.S01.1080p...
-            -> 狙击蝴蝶
-        番剧：[DBD-Raws][青之箱][01-25TV全集+特典映像][1080P]... -> 青之箱
+        策略（保护现有正确结果，少量救场）：
+          1. 启发式优先（已稳定，覆盖中文/数字剧名/番剧方括号大部分场景）；
+          2. 启发式给空时，再用 anitopy → guessit 兜底。
         """
-        # 番剧式：整名由多个 [..] 块组成，剧名也在某个方括号里。
-        # 从方括号块里挑第一个“不是发布组/技术/集数范围”的块作为剧名（中/英都可）。
-        if title.lstrip().startswith("["):
-            blocks = re.findall(r"\[([^\]]*)\]", title)
-            # 已知发布组/字幕组名（整块等于这些则跳过）
-            groups = {"dbd-raws", "vcb-studio", "nekomoe kissaten", "milks",
-                      "lolihouse", "fyy raws", "bonobosubs", "toc", "ани",
-                      "ohys-raws", "lilith-raws", "skymoon-raws", "ave"}
-            for b in blocks:
-                b = b.strip()
-                low = b.lower()
-                if not b:
-                    continue
-                if low in groups:
-                    continue
-                # 跳过含技术/集数范围/花絮标记的块
-                if re.search(r"(?i)(raws|rip|studio|subs|\d{3,4}p|x26|hevc|avc|"
-                             r"flac|aac|ac-3|e-ac|10bit|8bit|web-?dl|bdrip|"
-                             r"全集|特典|字幕|外挂|双语|menu|mkv|mp4|hi10p|ma10p|"
-                             r"\d{1,3}\s*-\s*\d{1,3}|bilibili|webrip|hdr|dovi)", b):
-                    continue
-                # 跳过纯数字块（那是集号 [19]）
-                if re.fullmatch(r"\d{1,4}", b):
-                    continue
-                cand = re.sub(r"\s+", " ", b).strip(" .-_·")
-                # 去掉块尾的季标记，如 "Ranma ½ (2024) S1" -> 截断在 S1/年份前
-                cand = re.split(r"(?i)\s+S\d{1,2}\b|\s*\((?:19|20)\d{2}\)", cand)[0].strip()
+        t = StrmRename._heuristic_clean_title(title)
+        if t:
+            return t
+        # 启发式失败时再用第三方库救场
+        if anitopy is not None:
+            try:
+                a = anitopy.parse(title) or {}
+                cand = a.get("anime_title")
                 if cand:
-                    return cand
+                    cand = StrmRename._post_clean_title(cand)
+                    if cand:
+                        return cand
+            except Exception:
+                pass
+        if guessit is not None:
+            try:
+                g = dict(guessit(title))
+                cand = g.get("title")
+                if cand:
+                    cand = StrmRename._post_clean_title(cand)
+                    if cand:
+                        return cand
+            except Exception:
+                pass
+        return ""
+
+    @staticmethod
+    def _post_clean_title(t: str) -> str:
+        """对 anitopy/guessit 给出的 title 做后处理：
+           - 去掉 [全N集]/[字幕] 等方括号块（解析库有时会保留）
+           - 去尾部年份(如 'Yi Wu Zhi 2022' -> 'Yi Wu Zhi')
+           - 去尾部「第N季」(如 '黑帮领地 第一季' -> '黑帮领地')
+           - 中英文混排时优先取前导中文段(如 '骄阳似我 Shine on Me' -> '骄阳似我')
+        """
+        t = re.sub(r"\[[^\]]*\]", " ", t)
+        t = re.sub(r"【[^】]*】", " ", t)
+        t = re.sub(r"\s+", " ", t).strip(" .-_·!&")
+        # 去尾部年份
+        t = re.sub(r"\s+(?:19|20)\d{2}$", "", t).strip()
+        # 去尾部「第N季」/「Season N」
+        t = re.sub(r"\s*第\s*[0-9一二三四五六七八九十]+\s*季\s*$", "", t).strip()
+        t = re.sub(r"(?i)\s*Season\s*\d+\s*$", "", t).strip()
+        # 中英混标题：取前导中文段（如「骄阳似我 Shine on Me」-> 骄阳似我）
+        cjk = re.match(r"^([\u4e00-\u9fff0-9：·\s]+?)\s+[A-Za-z]", t)
+        if cjk and re.search(r"[\u4e00-\u9fff]", cjk.group(1)):
+            t = cjk.group(1).strip()
+        return re.sub(r"\s+", " ", t).strip(" .-_·!&")
+
+    @staticmethod
+    def _heuristic_clean_title(title: str) -> str:
+        """自研启发式标题清洗（兜底，anitopy/guessit 都失败时用）。"""
+        # 番剧式：整名由多个 [..] 块 + 块之间的文字组成，剧名可能在某个方括号里
+        # （如 [青之箱]），也可能在方括号外（如 [MagicStar] Baby Walkure Everyday! [WEBDL]）。
+        # 收集所有候选片段，过滤掉发布组/技术/集数标记，再按“含中文>多词>最长”打分选最优。
+        if title.lstrip().startswith("["):
+            cand = StrmRename._pick_anime_title(title)
+            if cand:
+                return cand
 
         t = title
         # 1) 去掉【...】【...】整块（发布组/站点广告）
