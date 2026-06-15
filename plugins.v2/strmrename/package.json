@@ -2,7 +2,7 @@
   "id": "StrmRename",
   "name": "STRM 剧集重命名助手",
   "description": "电视剧/电影分目录处理：剧集按一级目录名统一重命名为 SxxExx，电影只清垃圾",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "author": "ahnuchen",
   "author_url": "https://github.com/yahoo2022",
   "icon": "edit.png",
