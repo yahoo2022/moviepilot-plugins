@@ -42,7 +42,7 @@ class OpenListScan(_PluginBase):
     plugin_name = "OpenList 扫描触发器"
     plugin_desc = "一键触发 OpenList 目录扫描，并在扫描完成后自动执行 MP 目录整理"
     plugin_icon = "refresh2.png"
-    plugin_version = "1.6.0"
+    plugin_version = "1.6.1"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "openlistscan_"
@@ -272,6 +272,8 @@ class OpenListScan(_PluginBase):
                 timed_out = True
                 break
             cur = stack.pop()
+            # 先 GET 当前目录，触发 Strm 驱动为该目录生成 strm 文件
+            self._get_path(cur)
             ok, entries, err = self._list_dir(cur)
             if not ok:
                 # 重试后仍失败：记录下来，其子树可能漏扫，最终汇报，绝不静默
@@ -341,6 +343,32 @@ class OpenListScan(_PluginBase):
         except Exception:
             return None
 
+    def _get_path(self, path: str) -> bool:
+        """调用 /api/fs/get 触发 OpenList Strm 驱动为该路径生成 strm 文件。
+
+        Strm 驱动是懒生成：仅靠 /api/fs/list 列目录在部分版本里不足以让该层 strm
+        落盘，需要先对路径做一次 /api/fs/get。和 incrpipeline 保持一致。
+        """
+        url = f"{self._openlist_url}/api/fs/get"
+        headers = {
+            "Authorization": self._openlist_token,
+            "Content-Type": "application/json",
+        }
+        try:
+            resp = requests.post(url, headers=headers,
+                                 json={"path": path, "refresh": False},
+                                 timeout=30)
+            resp.raise_for_status()
+            data = resp.json() or {}
+            ok = data.get("code") == 200
+            if not ok:
+                logger.warning(f"[{self.plugin_name}] get {path} 返回 "
+                               f"{data.get('code')}: {data.get('message')}")
+            return ok
+        except Exception as e:
+            logger.warning(f"[{self.plugin_name}] get {path} 异常: {e}")
+            return False
+
     def _list_dir(self, path: str) -> Tuple[bool, List[dict], str]:
         """
         调 OpenList /api/fs/list 列出一层目录。
@@ -357,7 +385,7 @@ class OpenListScan(_PluginBase):
         payload = {
             "path": path,
             "page": 1,
-            "per_page": 0,   # 0 = 不分页，返回全部
+            "per_page": 10000,   # 不能用 0：部分 OpenList 版本会返回 0 条，导致全量扫描文件数为 0
             "refresh": True,  # 强制刷新，触发 Strm 懒生成
         }
         last_err = ""

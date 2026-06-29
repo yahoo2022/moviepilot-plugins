@@ -4,7 +4,7 @@
   "description": "电视剧/电影分目录处理：剧集按一级目录名统一重命名为 SxxExx，电影只清垃圾",
   "version": "2.4.0",
   "author": "ahnuchen",
-  "author_url": "https://github.com/yahoo2022",
+  "author_url": "https://github.com/ahnuchen",
   "icon": "edit.png",
   "level": 1
 }

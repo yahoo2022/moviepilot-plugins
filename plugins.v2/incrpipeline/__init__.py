@@ -44,7 +44,7 @@ from app.schemas.types import EventType
 class IncrPipeline(_PluginBase):
     # 插件元数据
     plugin_name = "增量入库流水线"
-    plugin_desc = "一次触发顺序执行 OpenList 扫描生成 STRM + 增量整理刮削，两步各有独立开关"
+    plugin_desc = "一次触发顺序执行 OpenList 扫描生成 STRM + 增量整理刮削 + Emby 全库扫描，三步各有独立开关"
     plugin_icon = "workflow.png"
     plugin_version = "1.2.0"
     plugin_author = "yahoo2022"

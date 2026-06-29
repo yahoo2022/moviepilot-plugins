@@ -40,7 +40,7 @@ except Exception:
 
 class StrmRename(_PluginBase):
     plugin_name = "STRM 剧集重命名助手"
-    plugin_desc = "按上级目录名把纯数字 STRM 重命名为电视剧友好的 SxxExx 格式"
+    plugin_desc = "电视剧/电影分目录处理：剧集按一级目录名统一重命名为 SxxExx，电影只清垃圾"
     plugin_icon = "edit.png"
     plugin_version = "2.4.0"
     plugin_author = "ahnuchen"
