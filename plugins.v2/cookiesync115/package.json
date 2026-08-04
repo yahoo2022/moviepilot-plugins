@@ -1,0 +1,10 @@
+{
+  "id": "CookieSync115",
+  "name": "115 Cookie 同步",
+  "description": "定时通过 OpenList 校验 115 cookie，失效时扫码登录获取新 cookie 并写回 OpenList",
+  "version": "1.0.0",
+  "author": "yahoo2022",
+  "author_url": "https://github.com/yahoo2022",
+  "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/main/src/assets/images/misc/u115.png",
+  "level": 1
+}

@@ -8,6 +8,7 @@
 | `plugins.v2/openlistscan/` | OpenList 扫描触发器 | 一键触发 OpenList 扫描 + MP 目录整理 |
 | `plugins.v2/strmrename/` | STRM 剧集重命名助手 | 电视剧按一级目录名统一命名 SxxExx；电影只清垃圾；含集号铁律防误删 |
 | `plugins.v2/incrtransfer/` | 增量整理刮削 | 只整理最近 N 天新增/改动的媒体，支持电影/电视剧、复制/移动/链接/自动、目标路径与刮削 |
+| `plugins.v2/cookiesync115/` | 115 Cookie 同步 | 定时经 OpenList 探针校验 115 cookie，失效时扫码登录取新 cookie 并写回 OpenList；含手动粘贴 cookie 兜底 |
 
 > 仓库只面向 MoviePilot V2：索引为 `package.v2.json`，代码在 `plugins.v2/`。
 
@@ -28,5 +29,6 @@ cp -r plugins.v2/openlistscan /path/to/MoviePilot/config/plugins/
 cp -r plugins.v2/strmrename /path/to/MoviePilot/config/plugins/
 cp -r plugins.v2/incrtransfer /path/to/MoviePilot/config/plugins/
 cp -r plugins.v2/incrpipeline /path/to/MoviePilot/config/plugins/
+cp -r plugins.v2/cookiesync115 /path/to/MoviePilot/config/plugins/
 docker compose restart moviepilot
 ```

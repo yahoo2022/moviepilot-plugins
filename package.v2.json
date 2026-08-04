@@ -1,4 +1,16 @@
 {
+  "CookieSync115": {
+    "name": "115 Cookie 同步",
+    "description": "定时通过 OpenList 校验 115 cookie，失效时扫码登录获取新 cookie 并写回 OpenList",
+    "labels": "工具",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/main/src/assets/images/misc/u115.png",
+    "author": "yahoo2022",
+    "level": 1,
+    "history": {
+      "v1.0.0": "初始版本：通过 OpenList fs/list(refresh) 探针目录校验 115 cookie(防风控)，失效走扫码登录(二维码显示在插件页，默认 alipaymini 独占设备槽避免与浏览器 web 会话互踢)，拿到 cookie 自动写回 OpenList 中 driver 含 115 的存储；支持手动粘贴 cookie 兜底、重登录冷静期、Cron/远程命令 /sync115_check /sync115_login 触发"
+    }
+  },
   "IncrPipeline": {
     "name": "增量入库流水线",
     "description": "一次触发顺序执行 OpenList 扫描生成 STRM + 增量整理刮削 + Emby 全库扫描，三步各有独立开关",
