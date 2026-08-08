@@ -25,9 +25,12 @@
 因此本插件不实现该方式。需要「页面输入」的诉求由「手动粘贴 cookie」覆盖。
 """
 import base64
+import hashlib
+import hmac
 import json
 import threading
 import time
+import urllib.parse
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -49,7 +52,7 @@ class CookieSync115(_PluginBase):
     plugin_name = "115 Cookie 同步"
     plugin_desc = "定时通过 OpenList 校验 115 cookie，失效时扫码登录获取新 cookie 并写回 OpenList"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/main/src/assets/images/misc/u115.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "cookiesync115_"
@@ -70,11 +73,17 @@ class CookieSync115(_PluginBase):
     _enabled: bool = False
     _notify: bool = True
     _notify_type: str = "Plugin"
+    # 推送方式：mp=走 MP 通知渠道；dingtalk=直推钉钉 webhook（不依赖 MP 通知配置）
+    _push_target: str = "mp"
+    _dingtalk_webhook: str = ""     # 钉钉机器人 webhook 地址
+    _dingtalk_keyword: str = ""     # 钉钉「自定义关键词」安全设置时，消息需含此词
+    _dingtalk_secret: str = ""      # 钉钉「加签」安全设置时的密钥（SEC 开头）
 
     # ---- 一次性动作开关 ----
     _check_now: bool = False       # 立即校验一次
     _login_now: bool = False       # 立即发起扫码登录
     _apply_cookie_now: bool = False  # 立即把手动粘贴的 cookie 写回 OpenList
+    _test_push_now: bool = False   # 立即发一条测试通知
 
     # ---- OpenList ----
     _openlist_url: str = ""
@@ -102,10 +111,15 @@ class CookieSync115(_PluginBase):
             self._enabled = config.get("enabled", False)
             self._notify = config.get("notify", True)
             self._notify_type = config.get("notify_type") or "Plugin"
+            self._push_target = config.get("push_target") or "mp"
+            self._dingtalk_webhook = (config.get("dingtalk_webhook") or "").strip()
+            self._dingtalk_keyword = (config.get("dingtalk_keyword") or "").strip()
+            self._dingtalk_secret = (config.get("dingtalk_secret") or "").strip()
 
             self._check_now = config.get("check_now", False)
             self._login_now = config.get("login_now", False)
             self._apply_cookie_now = config.get("apply_cookie_now", False)
+            self._test_push_now = config.get("test_push_now", False)
 
             self._openlist_url = (config.get("openlist_url") or "").rstrip("/")
             self._openlist_token = config.get("openlist_token", "")
@@ -131,6 +145,9 @@ class CookieSync115(_PluginBase):
         elif self._apply_cookie_now:
             one_shot = self._apply_manual_cookie
             self._apply_cookie_now = False
+        elif self._test_push_now:
+            one_shot = self._run_test_push
+            self._test_push_now = False
 
         if one_shot is not None:
             self.update_config(self._current_config())
@@ -147,9 +164,14 @@ class CookieSync115(_PluginBase):
             "enabled": self._enabled,
             "notify": self._notify,
             "notify_type": self._notify_type,
+            "push_target": self._push_target,
+            "dingtalk_webhook": self._dingtalk_webhook,
+            "dingtalk_keyword": self._dingtalk_keyword,
+            "dingtalk_secret": self._dingtalk_secret,
             "check_now": self._check_now,
             "login_now": self._login_now,
             "apply_cookie_now": self._apply_cookie_now,
+            "test_push_now": self._test_push_now,
             "openlist_url": self._openlist_url,
             "openlist_token": self._openlist_token,
             "probe_path": self._probe_path,
@@ -267,6 +289,11 @@ class CookieSync115(_PluginBase):
     def _send_notify(self, title: str, text: str):
         if not self._notify:
             return
+        # 钉钉直推：不依赖 MP 通知渠道配置
+        if self._push_target == "dingtalk" and self._dingtalk_webhook:
+            self._send_dingtalk(title, text)
+            return
+        # 默认：走 MP 通知渠道（需在 MP 设定→通知里配好，并放行对应消息类型）
         try:
             from app.schemas.types import NotificationType as NT
             mtype = getattr(NT, self._notify_type, NT.Plugin)
@@ -276,6 +303,43 @@ class CookieSync115(_PluginBase):
             self.post_message(mtype=mtype, title=f"【{self.plugin_name}】{title}", text=text)
         except Exception as e:
             logger.warning(f"[{self.plugin_name}] 发送通知失败: {e}")
+
+    def _send_dingtalk(self, title: str, text: str):
+        """直推钉钉群机器人（text 类型）。支持自定义关键词 / 加签两种安全设置。"""
+        url = self._dingtalk_webhook
+        content = f"【{self.plugin_name}】{title}\n{text}"
+        # 自定义关键词：消息内容必须包含关键词，否则被钉钉拒收
+        if self._dingtalk_keyword and self._dingtalk_keyword not in content:
+            content = f"{self._dingtalk_keyword} {content}"
+        # 加签：URL 追加 timestamp + sign
+        if self._dingtalk_secret:
+            try:
+                ts = str(round(time.time() * 1000))
+                string_to_sign = f"{ts}\n{self._dingtalk_secret}"
+                hmac_code = hmac.new(self._dingtalk_secret.encode("utf-8"),
+                                     string_to_sign.encode("utf-8"),
+                                     digestmod=hashlib.sha256).digest()
+                sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+                sep = "&" if "?" in url else "?"
+                url = f"{url}{sep}timestamp={ts}&sign={sign}"
+            except Exception as e:
+                logger.warning(f"[{self.plugin_name}] 钉钉加签失败: {e}")
+        payload = {"msgtype": "text", "text": {"content": content}}
+        try:
+            resp = requests.post(url, json=payload, timeout=10).json()
+            if resp.get("errcode") == 0:
+                logger.info(f"[{self.plugin_name}] 钉钉推送成功")
+            else:
+                logger.warning(f"[{self.plugin_name}] 钉钉推送失败: {resp}")
+        except Exception as e:
+            logger.warning(f"[{self.plugin_name}] 钉钉推送异常: {e}")
+
+    def _run_test_push(self):
+        """发一条测试通知，用于验证推送链路（MP 通知渠道 或 钉钉直推）。"""
+        way = "钉钉直推" if (self._push_target == "dingtalk" and self._dingtalk_webhook) else "MP 通知渠道"
+        self._send_notify("测试推送", f"这是一条来自「{self.plugin_name}」的测试通知。\n"
+                                      f"当前推送方式：{way}。收到即说明链路正常。")
+        logger.info(f"[{self.plugin_name}] 已发送测试通知（{way}）")
 
     # ---------- 校验：走 OpenList，防风控 ----------
 
@@ -658,9 +722,27 @@ class CookieSync115(_PluginBase):
                         self._col(4, "VTextField", "relogin_cooldown_min", "重登录冷静期(分钟)",
                                   placeholder="30"),
                     ]},
+                    # 推送方式
                     {"component": "VRow", "content": [
-                        self._col(6, "VSelect", "notify_type", "通知类型",
+                        self._col(4, "VSelect", "push_target", "推送方式",
+                                  items=[
+                                      {"title": "钉钉直推(不依赖MP通知)", "value": "dingtalk"},
+                                      {"title": "MP 通知渠道", "value": "mp"},
+                                  ]),
+                        self._col(4, "VSelect", "notify_type", "MP通知类型(仅push=mp时用)",
                                   items=["Plugin", "SiteMessage", "Manual", "MediaServer", "Organize"]),
+                        self._col(4, "VSwitch", "test_push_now", "▶ 发送测试推送（开+保存）"),
+                    ]},
+                    # 钉钉直推参数
+                    {"component": "VRow", "content": [
+                        self._col(12, "VTextField", "dingtalk_webhook", "钉钉机器人 Webhook 地址",
+                                  placeholder="https://oapi.dingtalk.com/robot/send?access_token=xxx"),
+                    ]},
+                    {"component": "VRow", "content": [
+                        self._col(6, "VTextField", "dingtalk_keyword", "钉钉安全设置-自定义关键词(可选)",
+                                  placeholder="机器人设了关键词就填，消息会带上它"),
+                        self._col(6, "VTextField", "dingtalk_secret", "钉钉安全设置-加签密钥(可选)",
+                                  placeholder="SEC 开头，设了加签才填"),
                     ]},
                     # 手动 cookie
                     {"component": "VRow", "content": [
@@ -690,10 +772,15 @@ class CookieSync115(_PluginBase):
             "enabled": False,
             "notify": True,
             "notify_type": "Plugin",
+            "push_target": "dingtalk",
+            "dingtalk_webhook": "",
+            "dingtalk_keyword": "",
+            "dingtalk_secret": "",
             "auto_relogin": True,
             "check_now": False,
             "login_now": False,
             "apply_cookie_now": False,
+            "test_push_now": False,
             "openlist_url": "",
             "openlist_token": "",
             "probe_path": "",
