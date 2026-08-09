@@ -3,11 +3,12 @@
     "name": "115 Cookie 同步",
     "description": "定时通过 OpenList 校验 115 cookie，失效时扫码登录获取新 cookie 并写回 OpenList",
     "labels": "工具",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/main/src/assets/images/misc/u115.png",
     "author": "yahoo2022",
     "level": 1,
     "history": {
+      "v1.2.0": "新增仪表盘组件(自动刷新5秒)：可加到 MP 首页，扫码登录二维码在组件里显示、扫码成功自动变为成功，免手动重开配置页；组件纯读本地状态，不触发任何 115/OpenList 请求",
       "v1.1.0": "新增钉钉直推：不依赖 MP 通知渠道，插件内直接填钉钉 webhook 推送(支持自定义关键词/加签)；新增「发送测试推送」按钮验证链路；推送方式默认钉钉直推",
       "v1.0.0": "初始版本：通过 OpenList fs/list(refresh) 探针目录校验 115 cookie(防风控)，失效走扫码登录(二维码显示在插件页，默认 alipaymini 独占设备槽避免与浏览器 web 会话互踢)，拿到 cookie 自动写回 OpenList 中 driver 含 115 的存储；支持手动粘贴 cookie 兜底、重登录冷静期、Cron/远程命令 /sync115_check /sync115_login 触发"
     }

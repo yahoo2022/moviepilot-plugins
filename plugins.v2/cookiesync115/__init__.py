@@ -52,7 +52,7 @@ class CookieSync115(_PluginBase):
     plugin_name = "115 Cookie 同步"
     plugin_desc = "定时通过 OpenList 校验 115 cookie，失效时扫码登录获取新 cookie 并写回 OpenList"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/main/src/assets/images/misc/u115.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "cookiesync115_"
@@ -805,6 +805,54 @@ class CookieSync115(_PluginBase):
 
     def get_page(self) -> List[dict]:
         return None
+
+    # ---------- 仪表盘组件（自动刷新，纯读本地状态，不调用 115/OpenList）----------
+
+    def get_dashboard_meta(self) -> Optional[List[Dict[str, str]]]:
+        """声明一个仪表盘组件，可在 MP 首页仪表盘添加。"""
+        return [{"key": "cookiesync115_status", "name": "115 Cookie 状态"}]
+
+    def get_dashboard(self, key: str = "", **kwargs):
+        """
+        返回 (列宽, 组件属性, 元素)。attrs.refresh 设定秒级自动刷新。
+        只读 self._get_status()（插件本地数据），不触发任何 115/OpenList 请求：
+        二维码是「扫码登录」动作那一刻生成并存进状态的，这里仅渲染。
+        """
+        status = self._get_status()
+        body: List[dict] = [
+            {
+                "component": "VAlert",
+                "props": {
+                    "type": self._alert_type(status.get("state")),
+                    "variant": "tonal",
+                    "density": "compact",
+                    "text": f"状态：{status.get('state')} | {status.get('message')}"
+                            f"（{status.get('updated') or 'N/A'}）",
+                },
+            }
+        ]
+        if status.get("state") == "qr_waiting" and status.get("qr_image"):
+            body.append({
+                "component": "VImg",
+                "props": {
+                    "src": status.get("qr_image"),
+                    "width": 200, "height": 200,
+                    "class": "mx-auto my-2",
+                },
+            })
+            body.append({
+                "component": "VAlert",
+                "props": {
+                    "type": "info", "variant": "tonal", "density": "compact",
+                    "text": "用 115 手机 App 扫码，扫码后在手机点确认；本组件每几秒自动刷新，"
+                            "扫码成功后会自动变为「成功」。",
+                },
+            })
+        elements = [{"component": "VCardText", "content": body}]
+        cols = {"cols": 12, "md": 6}
+        attrs = {"refresh": 5, "border": True, "title": "115 Cookie 状态",
+                 "subtitle": "自动刷新 · 扫码登录二维码在此显示"}
+        return cols, attrs, elements
 
     def stop_service(self):
         try:
