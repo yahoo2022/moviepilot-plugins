@@ -52,7 +52,7 @@ class CookieSync115(_PluginBase):
     plugin_name = "115 Cookie 同步"
     plugin_desc = "定时通过 OpenList 校验 115 cookie，失效时扫码登录获取新 cookie 并写回 OpenList"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/main/src/assets/images/misc/u115.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "cookiesync115_"
@@ -84,6 +84,7 @@ class CookieSync115(_PluginBase):
     _login_now: bool = False       # 立即发起扫码登录
     _apply_cookie_now: bool = False  # 立即把手动粘贴的 cookie 写回 OpenList
     _test_push_now: bool = False   # 立即发一条测试通知
+    _reload_now: bool = False      # 立即重载 OpenList 存储（不换 cookie，复位驱动）
 
     # ---- OpenList ----
     _openlist_url: str = ""
@@ -120,6 +121,7 @@ class CookieSync115(_PluginBase):
             self._login_now = config.get("login_now", False)
             self._apply_cookie_now = config.get("apply_cookie_now", False)
             self._test_push_now = config.get("test_push_now", False)
+            self._reload_now = config.get("reload_now", False)
 
             self._openlist_url = (config.get("openlist_url") or "").rstrip("/")
             self._openlist_token = config.get("openlist_token", "")
@@ -148,6 +150,9 @@ class CookieSync115(_PluginBase):
         elif self._test_push_now:
             one_shot = self._run_test_push
             self._test_push_now = False
+        elif self._reload_now:
+            one_shot = self._run_reload
+            self._reload_now = False
 
         if one_shot is not None:
             self.update_config(self._current_config())
@@ -172,6 +177,7 @@ class CookieSync115(_PluginBase):
             "login_now": self._login_now,
             "apply_cookie_now": self._apply_cookie_now,
             "test_push_now": self._test_push_now,
+            "reload_now": self._reload_now,
             "openlist_url": self._openlist_url,
             "openlist_token": self._openlist_token,
             "probe_path": self._probe_path,
@@ -344,7 +350,14 @@ class CookieSync115(_PluginBase):
     # ---------- 校验：走 OpenList，防风控 ----------
 
     def _run_check(self) -> bool:
-        """通过 OpenList 校验 115 cookie 是否有效。返回 True=有效。"""
+        """
+        校验 115 cookie/访问是否正常，带自愈：
+          1. 探测（OpenList 列探针目录）；通过 -> 结束
+          2. 失败 -> 先『重载存储』（当前 cookie 原样写回，触发驱动重建）再探一次
+             -> 通过：说明是驱动卡死/临时拦截，非 cookie 失效，已复位
+          3. 仍失败 -> 判定 cookie 失效或 115 临时拦截，通知；按需扫码
+        返回 True=可用。
+        """
         if not self._precheck_openlist():
             return False
         if not self._probe_path:
@@ -359,14 +372,124 @@ class CookieSync115(_PluginBase):
             logger.info(f"[{self.plugin_name}] 校验通过：{detail}")
             return True
 
-        # 失效
-        self._set_status("invalid", f"cookie 疑似失效：{detail}")
-        logger.warning(f"[{self.plugin_name}] 校验失败：{detail}")
-        self._send_notify("115 cookie 失效", f"探针目录 {self._probe_path} 访问失败：{detail}\n"
-                                              f"{'即将自动发起扫码登录，请到插件页扫码。' if self._auto_relogin else '请手动发起扫码登录。'}")
-        if self._auto_relogin and self._cooldown_ok():
+        # 第一次失败：先尝试重载存储自愈（用当前 cookie 原样写回，触发驱动重建）
+        logger.warning(f"[{self.plugin_name}] 校验失败：{detail}；尝试重载 OpenList 存储自愈")
+        reloaded, rmsg = self._reload_openlist_storage()
+        if reloaded:
+            time.sleep(3)
+            ok2, detail2 = self._probe_via_openlist()
+            if ok2:
+                self._set_status("valid", "重载存储后恢复（此前为驱动卡死/临时拦截，非 cookie 失效）")
+                logger.info(f"[{self.plugin_name}] 重载存储后校验通过（{rmsg}）")
+                self._send_notify("115 访问已自愈",
+                                  "OpenList 之前列目录失败，重载存储后已恢复"
+                                  "（判断为驱动卡死/临时拦截，非 cookie 失效）。")
+                return True
+            detail = detail2  # 用重载后的最新报错
+
+        # 重载也救不回来：cookie 真失效 或 115 临时拦截（115 对两者都回同样的 405，无法自动区分）
+        can_relogin = self._auto_relogin and self._cooldown_ok()
+        waf = self._looks_like_waf_block(detail)
+        note = ("说明：115 对『cookie 失效』和『临时风控/限流』会返回相同的 405 拦截页，无法自动区分；"
+                "若属临时风控，换 cookie 也无效，等一段时间通常自动恢复。\n" if waf else "")
+        action = ("将尝试扫码登录换新 cookie（请到插件页/仪表盘扫码）。" if can_relogin
+                  else "请手动点『扫码登录』换 cookie，或在浏览器/扩展重新同步。")
+        self._set_status("invalid", f"列目录失败且重载未恢复：{detail[:150]}")
+        logger.warning(f"[{self.plugin_name}] 重载后仍失败：{detail[:200]}")
+        self._send_notify("115 访问异常（重载未恢复）", f"{detail[:150]}\n{note}{action}")
+        if can_relogin:
             self._run_qr_login()
         return False
+
+    @staticmethod
+    def _looks_like_waf_block(msg: str) -> bool:
+        """判断报错是否是 115/阿里云 WAF 的 405 拦截页（cookie 失效或临时风控都会命中）。"""
+        if not msg:
+            return False
+        m = msg.lower()
+        return any(k in m for k in
+                   ["405", "data-spm", "访问被阻断", "阻断", "errors.aliyun.com",
+                    "potential threats", "doctypehtml"])
+
+    def _reload_openlist_storage(self) -> Tuple[bool, str]:
+        """把匹配的 115 存储『当前配置原样写回』，触发 OpenList 重新初始化该驱动。
+        不改变 cookie，仅用于复位『驱动卡死』。"""
+        headers = {"Authorization": self._openlist_token, "Content-Type": "application/json"}
+        list_url = f"{self._openlist_url}/api/admin/storage/list"
+        update_url = f"{self._openlist_url}/api/admin/storage/update"
+        try:
+            resp = requests.get(list_url, headers=headers,
+                                params={"page": 1, "per_page": 1000}, timeout=30)
+            resp.raise_for_status()
+            data = resp.json() or {}
+        except Exception as e:
+            return False, f"读取存储列表异常：{e}"
+        if data.get("code") != 200:
+            return False, f"读取存储列表返回 {data.get('code')}: {data.get('message')}"
+        storages = (data.get("data") or {}).get("content") or []
+        kw = (self._driver_keyword or "115").lower()
+        reloaded, failed = [], []
+        for st in storages:
+            driver = str(st.get("driver") or "")
+            try:
+                addition = json.loads(st.get("addition") or "{}")
+            except Exception:
+                addition = {}
+            if kw not in driver.lower() or "cookie" not in addition:
+                continue
+            try:
+                ur = requests.post(update_url, headers=headers, json=st, timeout=30).json()
+                if ur.get("code") == 200:
+                    reloaded.append(st.get("mount_path") or str(st.get("id")))
+                else:
+                    failed.append(f"{st.get('mount_path')}: {ur.get('message')}")
+            except Exception as e:
+                failed.append(f"{st.get('mount_path')}: {e}")
+        if reloaded and not failed:
+            return True, f"已重载 {', '.join(reloaded)}"
+        if not reloaded and not failed:
+            return False, "未找到匹配的 115 存储"
+        if reloaded:
+            return True, f"部分重载 {', '.join(reloaded)}；失败 {', '.join(failed)}"
+        return False, f"重载失败：{', '.join(failed)}"
+
+    def _run_reload(self):
+        """一次性动作：重载存储 + 复测，用于手动复位驱动卡死。"""
+        if not self._precheck_openlist():
+            return
+        ok, msg = self._reload_openlist_storage()
+        if not ok:
+            self._set_status("error", f"重载存储失败：{msg}")
+            self._send_notify("重载存储失败", msg)
+            return
+        time.sleep(3)
+        if self._probe_path:
+            ok2, _ = self._probe_via_openlist()
+            if ok2:
+                self._set_status("valid", f"已重载存储且校验通过：{msg}")
+                self._send_notify("115 存储已重载", f"{msg}；重载后校验通过。")
+            else:
+                self._set_status("invalid", f"已重载但校验仍失败：{msg}")
+                self._send_notify("115 存储已重载(仍异常)",
+                                  f"{msg}，但重载后校验仍失败，可能 cookie 真失效或 115 临时拦截。")
+        else:
+            self._set_status("valid", f"已重载存储：{msg}（未配探针目录，未复测）")
+            self._send_notify("115 存储已重载", msg)
+
+    def _make_qr_b64(self, content: str) -> str:
+        """本地把二维码内容渲染成 PNG base64（不依赖 115 图片接口，最稳）。失败返回空串。"""
+        if not content:
+            return ""
+        try:
+            import qrcode
+            from io import BytesIO
+            img = qrcode.make(content)
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+        except Exception as e:
+            logger.warning(f"[{self.plugin_name}] 本地生成二维码失败（回退拉图片接口）：{e}")
+            return ""
 
     def _precheck_openlist(self) -> bool:
         if not self._openlist_url or not self._openlist_token:
@@ -476,20 +599,26 @@ class CookieSync115(_PluginBase):
             uid = qr_data.get("uid")
             sign = qr_data.get("sign")
             tm = qr_data.get("time")
+            qr_content = qr_data.get("qrcode") or ""  # 二维码内容(如 https://115.com/scan/dg-<uid>)
 
-            # 2. 取二维码图片，转 base64 显示在插件页
-            qr_b64 = ""
-            try:
-                img = sess.get(self._QR_IMAGE_URL.format(uid=uid), timeout=30)
-                if img.status_code == 200 and img.content:
-                    qr_b64 = "data:image/png;base64," + base64.b64encode(img.content).decode()
-            except Exception as e:
-                logger.warning(f"[{self.plugin_name}] 取二维码图片失败：{e}")
+            # 2. 生成二维码：优先本地用 qrcode 内容画图（不依赖 115 图片接口，最稳）；
+            #    本地失败再回退拉 115 图片接口。
+            qr_b64 = self._make_qr_b64(qr_content)
+            if not qr_b64:
+                try:
+                    img = sess.get(self._QR_IMAGE_URL.format(uid=uid), timeout=30)
+                    if img.status_code == 200 and img.content:
+                        qr_b64 = "data:image/png;base64," + base64.b64encode(img.content).decode()
+                except Exception as e:
+                    logger.warning(f"[{self.plugin_name}] 取二维码图片失败：{e}")
+            tip = "打开 MP → 本插件配置页/仪表盘即可看到二维码；用 115 生活 App 扫一扫"
+            if not qr_b64 and qr_content:
+                tip = f"二维码图渲染失败，可用 115 App 扫此内容：{qr_content}"
             self._set_status(
                 "qr_waiting",
                 f"二维码已生成（设备类型 {app}），请用 115 手机 App 扫码，扫码后在手机点确认",
                 qr_image=qr_b64,
-                qr_tip="打开 MP → 本插件配置页即可看到二维码；用 115 生活 App 扫一扫",
+                qr_tip=tip,
             )
             self._send_notify("115 扫码登录已就绪",
                               f"请打开 MoviePilot →「{self.plugin_name}」插件配置页，用 115 手机 App 扫码登录。\n"
@@ -695,9 +824,10 @@ class CookieSync115(_PluginBase):
                         ]},
                     ]},
                     {"component": "VRow", "content": [
-                        self._col(4, "VSwitch", "check_now", "▶ 检测状态（开+保存执行）"),
-                        self._col(4, "VSwitch", "login_now", "▶ 扫码登录（开+保存执行）"),
-                        self._col(4, "VSwitch", "apply_cookie_now", "▶ 写回手动 cookie（开+保存执行）"),
+                        self._col(3, "VSwitch", "check_now", "▶ 检测状态（开+保存）"),
+                        self._col(3, "VSwitch", "reload_now", "▶ 重载存储复位（开+保存）"),
+                        self._col(3, "VSwitch", "login_now", "▶ 扫码登录（开+保存）"),
+                        self._col(3, "VSwitch", "apply_cookie_now", "▶ 写回手动 cookie（开+保存）"),
                     ]},
                     # OpenList
                     {"component": "VRow", "content": [
@@ -781,6 +911,7 @@ class CookieSync115(_PluginBase):
             "login_now": False,
             "apply_cookie_now": False,
             "test_push_now": False,
+            "reload_now": False,
             "openlist_url": "",
             "openlist_token": "",
             "probe_path": "",
