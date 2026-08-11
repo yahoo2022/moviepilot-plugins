@@ -3,11 +3,12 @@
     "name": "115 Cookie 同步",
     "description": "定时通过 OpenList 校验 115 cookie，失效时扫码登录获取新 cookie 并写回 OpenList",
     "labels": "工具",
-    "version": "1.3.0",
+    "version": "1.3.1",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/main/src/assets/images/misc/u115.png",
     "author": "yahoo2022",
     "level": 1,
     "history": {
+      "v1.3.1": "默认扫码设备类型改为 wechatmini(微信小程序槽,平时不用,独占给插件);UI 提示别选 android/ios/web 等你手机或浏览器在用的槽以免互踢",
       "v1.3.0": "校验失败先『重载存储』自愈(当前cookie原样写回触发OpenList驱动重建)再复测，恢复则判为驱动卡死/临时拦截而非cookie失效；仍失败才判失效/扫码，并识别115的405拦截页给出诚实说明(cookie失效与临时风控无法区分)；新增『▶重载存储复位』按钮；二维码改为本地渲染(qrcode)不再依赖115图片接口，解决二维码出不来",
       "v1.2.0": "新增仪表盘组件(自动刷新5秒)：可加到 MP 首页，扫码登录二维码在组件里显示、扫码成功自动变为成功，免手动重开配置页；组件纯读本地状态，不触发任何 115/OpenList 请求",
       "v1.1.0": "新增钉钉直推：不依赖 MP 通知渠道，插件内直接填钉钉 webhook 推送(支持自定义关键词/加签)；新增「发送测试推送」按钮验证链路；推送方式默认钉钉直推",

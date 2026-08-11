@@ -14,7 +14,7 @@
 
 获取 cookie 的两种方式：
   - 扫码登录（推荐，默认）：纯 HTTP，无验证码、无滑块。二维码显示在本插件页面上，
-    用 115 手机 App 扫一下即可。同一「设备类型(app)」会互相踢下线，默认用 alipaymini
+    用 115 手机 App 扫一下即可。同一「设备类型(app)」会互相踢下线，默认用 wechatmini
     独占一个设备槽，避免和你自己浏览器的 115 web 会话互踢（互踢正是 cookie 频繁失效的
     元凶之一）。
   - 手动粘贴 cookie（兜底）：把浏览器里的 115 cookie 串粘到插件页面，插件校验后写回
@@ -52,7 +52,7 @@ class CookieSync115(_PluginBase):
     plugin_name = "115 Cookie 同步"
     plugin_desc = "定时通过 OpenList 校验 115 cookie，失效时扫码登录获取新 cookie 并写回 OpenList"
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Frontend/main/src/assets/images/misc/u115.png"
-    plugin_version = "1.3.0"
+    plugin_version = "1.3.1"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "cookiesync115_"
@@ -94,7 +94,7 @@ class CookieSync115(_PluginBase):
     _driver_keyword: str = "115"   # 匹配 115 存储的 driver 关键字
 
     # ---- 登录 ----
-    _login_app: str = "alipaymini"  # 115 设备类型
+    _login_app: str = "wechatmini"  # 115 设备类型
     _manual_cookie: str = ""        # 手动粘贴的 cookie 串
 
     # ---- 调度与风控 ----
@@ -580,7 +580,7 @@ class CookieSync115(_PluginBase):
             return
         try:
             self.save_data("last_login_ts", time.time())
-            app = self._login_app if self._login_app in self._APP_CHOICES else "alipaymini"
+            app = self._login_app if self._login_app in self._APP_CHOICES else "wechatmini"
             sess = requests.Session()
             sess.headers.update({"User-Agent": self._UA})
 
@@ -890,7 +890,8 @@ class CookieSync115(_PluginBase):
                                 "text": "校验走 OpenList 的 fs/list(refresh) 打「探针目录」判断 cookie 死活，"
                                         "防风控且贴近真实访问；建议在 115 里建一个只有 1~2 个小文件的目录作探针。"
                                         "失效后走扫码登录：二维码显示在本页，用 115 手机 App 扫一扫。"
-                                        "设备类型默认 alipaymini，独占一个设备槽，避免和你浏览器的 115 网页登录互踢。"
+                                        "设备类型默认 wechatmini（微信小程序槽，你平时不用，独占给插件），"
+                                        "别选 android/ios/web 这些你手机或浏览器在用的，会互相挤下线。"
                                         "拿到新 cookie 后自动写回 OpenList 中 driver 含「115」的存储。",
                             }},
                         ]},
@@ -917,7 +918,7 @@ class CookieSync115(_PluginBase):
             "probe_path": "",
             "driver_keyword": "115",
             "deep_check": False,
-            "login_app": "alipaymini",
+            "login_app": "wechatmini",
             "cron": "",
             "relogin_cooldown_min": 30,
             "manual_cookie": "",
