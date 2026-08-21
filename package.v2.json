@@ -1,4 +1,16 @@
 {
+  "MediaPipeline": {
+    "name": "媒体入库流水线",
+    "description": "四步合一：OpenList扫描 + 网盘改名清洗(改115源防insert复活) + 增量整理刮削 + Emby扫描，各步独立开关，含115防风控与预演",
+    "labels": "整理",
+    "version": "1.0.0",
+    "icon": "workflow.png",
+    "author": "yahoo2022",
+    "level": 1,
+    "history": {
+      "v1.0.0": "初始版本：四步合一(OpenList扫描/网盘改名清洗改115源防insert复活/增量整理刮削/Emby扫描);步骤2读strm解析115源路径→OpenList rename/remove改115源+本地同步改名重建URL(逐段编码),拟人化限速防风控+预演;目录名规整为『剧名(年份)』、垃圾分层(附属子目录/标记即使有年份也删,正片集号保护)、合集跳过交人工"
+    }
+  },
   "CookieSync115": {
     "name": "115 Cookie 同步",
     "description": "定时通过 OpenList 校验 115 cookie，失效时扫码登录获取新 cookie 并写回 OpenList",
