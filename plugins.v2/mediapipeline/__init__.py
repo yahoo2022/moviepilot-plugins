@@ -932,9 +932,10 @@ class MediaPipeline(_PluginBase):
         details: List[Tuple[str, str, str, str]] = []
         reason_count: Dict[str, int] = {}
 
-        # 2a：目录名清洗（去广告前缀，仅电视剧目录；先做，避免和文件改名交叉）
+        # 2a：目录名清洗（去广告前缀 → 剧名(年份)）。电视剧+电影都做——电影没集号，
+        # 目录名是唯一识别源，更需要清洗；先做，避免和文件改名交叉。
         if self._rn_clean_dirs and not self._aborted_backoff:
-            for p in tv_paths:
+            for p in (tv_paths + movie_paths):
                 root = Path(p)
                 if root.exists() and root.is_dir():
                     self._clean_dir_names(root, cutoff_ts, stat, details)
