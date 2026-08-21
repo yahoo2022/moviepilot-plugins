@@ -84,6 +84,17 @@ class MediaPipeline(_PluginBase):
         "[trailer],[logo],[scans],[fonts]"
     )
 
+    # 步骤2 附属子目录：位于这些子目录里的文件视为附属垃圾，即使有年份/清晰度也删。
+    # 注意：不含 Specials/Season 0（Emby 正规特别篇，默认保留）。可在配置里增删。
+    _DEFAULT_JUNK_SUBDIRS = ("SPs,Extras,Scans,Fonts,Music,CDs,Trailers,Sample,Samples,"
+                             "NCOP,NCED,特典,映像特典,音乐特典,花絮,预告,预告片,menu")
+
+    # 文件名附属标记（命中即垃圾，即使有年份/清晰度）
+    _EXTRAS_MARKERS = ("[menu]", "映像特典", "音乐特典", "花絮", "预告片", "creditless",
+                       ".ncop.", ".nced.", "ending ver", "review ver", "opening ver",
+                       "preview ver", "[sp]", "[pv]", "[trailer]", "[logo]",
+                       "[scans]", "[fonts]", "[cm]", ".sample.", "-sample.")
+
     # ---- 总开关 ----
     _enabled: bool = False
     _notify: bool = True
@@ -121,6 +132,7 @@ class MediaPipeline(_PluginBase):
     _rn_clean_junk: bool = True
     _rn_no_number_is_junk: bool = True
     _rn_junk_keywords: str = ""
+    _rn_junk_subdirs: str = ""       # 附属子目录清单，空=用 _DEFAULT_JUNK_SUBDIRS
     _rn_recent_days: int = 0
     _rn_after_date: str = ""
     _rn_template: str = "{title}.S{season:02d}E{episode:02d}{tail}"  # 不含扩展名，末尾补真实后缀
@@ -197,6 +209,9 @@ class MediaPipeline(_PluginBase):
             self._rn_clean_junk = config.get("rn_clean_junk", True)
             self._rn_no_number_is_junk = config.get("rn_no_number_is_junk", True)
             self._rn_junk_keywords = config.get("rn_junk_keywords") or ""
+            self._rn_junk_subdirs = (config.get("rn_junk_subdirs")
+                                     if config.get("rn_junk_subdirs") is not None
+                                     else self._DEFAULT_JUNK_SUBDIRS)
             self._rn_recent_days = int(config.get("rn_recent_days") or 0)
             self._rn_after_date = (config.get("rn_after_date") or "").strip()
             self._rn_template = (config.get("rn_template")
@@ -257,7 +272,8 @@ class MediaPipeline(_PluginBase):
             "rn_default_season": self._rn_default_season, "rn_max_episode": self._rn_max_episode,
             "rn_preserve_tail": self._rn_preserve_tail, "rn_clean_junk": self._rn_clean_junk,
             "rn_no_number_is_junk": self._rn_no_number_is_junk,
-            "rn_junk_keywords": self._rn_junk_keywords, "rn_recent_days": self._rn_recent_days,
+            "rn_junk_keywords": self._rn_junk_keywords, "rn_junk_subdirs": self._rn_junk_subdirs,
+            "rn_recent_days": self._rn_recent_days,
             "rn_after_date": self._rn_after_date, "rn_template": self._rn_template,
             "keep_reports": self._keep_reports, "container": self._container,
             "rl_min": self._rl_min, "rl_max": self._rl_max, "rl_batch": self._rl_batch,
@@ -1094,6 +1110,12 @@ class MediaPipeline(_PluginBase):
 
     def _handle_rename(self, strm: Path, content: str, src_115: Optional[str],
                        root: Path, stat: dict, details: list, reason_count: dict):
+        # 合集包（[共N部合集]，一个文件夹塞多部）：自动拆错误率高，跳过交人工
+        if "部合集" in str(strm):
+            stat["skipped"] += 1
+            reason_count["collection_manual"] = reason_count.get("collection_manual", 0) + 1
+            details.append(("SKIP", "collection", str(strm), "合集包，交人工"))
+            return
         stem = strm.stem
         parsed = self._parse_any_episode(stem)
         if not parsed:
@@ -1189,22 +1211,35 @@ class MediaPipeline(_PluginBase):
     # ---- 目录名清洗规则（保守：去广告块/域名/发布站关键字）----
 
     def _clean_dir_name(self, name: str) -> str:
-        t = name
-        t = re.sub(r"【[^】]*】", "", t)                       # 去【广告块】
-        t = re.sub(r"\[[^\]]*(?:\.(?:com|net|cc|me|tv|xyz|org|cn))[^\]]*\]", "", t, flags=re.I)  # 去[站点块]
-        t = re.sub(r"(?i)(?:www\.)?[a-z0-9-]+\.(?:com|net|cc|me|tv|xyz|org|cn)", "", t)  # 去裸域名
-        # 发布站中文短语（据 2026-08-21 失败快照统计，纯文本剥除，绝不会是真标题的一部分）
+        """把一级目录名规整为「剧名 (年份)」（电影、剧集都留年份）。
+        先剥发布站中文短语（_clean_title 不认识这些），再用 _clean_title 提取干净标题
+        （内部会剥【】/[站点]/域名/发布组/技术标签、中英混排取中文），再补年份。
+        提取不到可靠标题、或结果与原名相同 → 返回 "" 表示跳过不改。"""
+        pre = name
         for kw in ("地址发布页", "收藏不迷路", "最新电影", "电影港",
                    "高清剧集网发布", "高清剧集网", "高清影视之家发布", "高清影视之家",
                    "更多电视剧集下载访问", "更多剧集打包下载访问", "更多电视剧集下载请访问",
                    "更多剧集打包下载请访问", "4K时光",
                    "6v电影", "阳光电影", "电影天堂", "電影天堂", "BT天堂", "不太灵影视"):
-            t = t.replace(kw, "")
-        # 注意：strip 字符集不含圆括号，避免把「三体 (2023)」削成「三体 (2023」破坏年份
-        t = re.sub(r"\s+", " ", t).strip(" .-_·【】[]")
-        if not t or t == name or len(t) < 2:
+            pre = pre.replace(kw, " ")
+        title = self._clean_title(pre)
+        if not title or len(title) < 2:
             return ""
-        return self._safe_name(t)
+        year = self._extract_year(name)
+        new = f"{title} ({year})" if (year and str(year) not in title) else title
+        new = self._safe_name(new).strip()
+        if not new or new == name.strip() or len(new) < 2:
+            return ""
+        return new
+
+    @staticmethod
+    def _extract_year(name: str) -> Optional[int]:
+        """取目录名里首个 19xx/20xx 年份(1900-2099)，用于「剧名 (年份)」。分辨率(2160p等)不会误命中。"""
+        for m in re.finditer(r"(?<!\d)(?:19|20)\d{2}(?!\d)", name):
+            y = int(m.group(0))
+            if 1900 <= y <= 2099:
+                return y
+        return None
 
     # ==================== 步骤2：集号/标题/垃圾解析（移植自 strmrename）====================
 
@@ -1373,20 +1408,38 @@ class MediaPipeline(_PluginBase):
             return True
         return False
 
+    def _junk_subdir_set(self) -> set:
+        raw = self._rn_junk_subdirs.strip() or self._DEFAULT_JUNK_SUBDIRS
+        return {p.strip().lower() for p in raw.replace("，", "\n").replace(",", "\n").splitlines()
+                if p.strip()}
+
     def _is_junk(self, file_path: Path) -> bool:
+        """分层判垃圾（API 删垃圾为主，铁律保护正片）：
+          1) 位于附属子目录(SPs/Extras/特典/花絮/Music/CDs...) → 垃圾，即使有年份/清晰度；
+          2) 文件名带附属标记([SP]/[PV]/NCOP/预告片/映像特典/menu...) → 垃圾，即使有年份/清晰度；
+          3) 正片保护：有集号(SxxExx/Exx/第N集/[NN]) 或 有年份/清晰度 → 不删；
+          4) 无集号无年份但命中广告词/域名 → 垃圾；
+          5) 开「无数字即垃圾」且文件名无数字 → 垃圾。
+        """
         stem = file_path.stem
         name = file_path.name.lower()
-        extras = ("[menu]", "映像特典", "音乐特典", "花絮", "预告片", "creditless",
-                  ".ncop.", ".nced.", "ending ver", "review ver", "opening ver",
-                  "preview ver", "[sp]", "[pv]", "[trailer]", "[logo]")
-        for ex in extras:
+        # 1) 附属子目录（Specials/Season 0 默认不在清单里，正规特别篇保留）
+        junk_dirs = self._junk_subdir_set()
+        for part in file_path.parts[:-1]:
+            if part.strip().lower() in junk_dirs:
+                return True
+        # 2) 文件名附属标记
+        for ex in self._EXTRAS_MARKERS:
             if ex in name:
                 return True
+        # 3) 正片保护
         if self._has_episode_marker(stem) or self._has_real_content(stem):
             return False
+        # 4) 广告/域名
         for kw in self._junk_kw_list():
             if kw.lower() in name:
                 return True
+        # 5) 无数字
         if self._rn_no_number_is_junk and not re.search(r"\d", stem):
             return True
         return False
@@ -1652,9 +1705,13 @@ class MediaPipeline(_PluginBase):
                     {
                         "component": "VRow",
                         "content": [
-                            self._col(12, "VTextarea", "rn_junk_keywords",
+                            self._col(6, "VTextarea", "rn_junk_keywords",
                                       "垃圾关键字 (换行/逗号分隔，留空用内置默认)",
                                       placeholder="更多原盘请访问\n全球首发\nmp4kan.com", rows=2, autoGrow=True),
+                            self._col(6, "VTextarea", "rn_junk_subdirs",
+                                      "附属子目录 (在这些子目录里的即使有年份也删；不含Specials)",
+                                      placeholder="SPs,Extras,Scans,Fonts,Music,CDs,特典,花絮,预告",
+                                      rows=2, autoGrow=True),
                         ],
                     },
                     self._subtitle("步骤2 · 115 防风控节奏（只作用于 rename/remove 写操作；预演不触发）"),
@@ -1782,6 +1839,7 @@ class MediaPipeline(_PluginBase):
             "rn_recursive": True, "rn_dry_run": True, "rn_clean_dirs": False,
             "rn_default_season": 1, "rn_max_episode": 500, "rn_preserve_tail": True,
             "rn_clean_junk": True, "rn_no_number_is_junk": True, "rn_junk_keywords": "",
+            "rn_junk_subdirs": self._DEFAULT_JUNK_SUBDIRS,
             "rn_recent_days": 0, "rn_after_date": "",
             "rn_template": "{title}.S{season:02d}E{episode:02d}{tail}",
             "keep_reports": 10, "container": "moviepilot-v2",
