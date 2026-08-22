@@ -1445,6 +1445,10 @@ class MediaPipeline(_PluginBase):
             return True
         return False
 
+    # 番剧候选里要拒绝的块：域名(bdys.me/xxx.com) / 字幕·音轨标签(简繁内封/中文字幕/国语配音…)——都不是剧名
+    _TAG_REJECT = re.compile(
+        r"(?i)(\.(?:com|net|cc|me|tv|org|cn)\b|内封|内嵌|外挂|字幕|中字|配音|音轨|双语|简繁|无字)")
+
     @staticmethod
     def _pick_anime_title(title: str) -> str:
         blocks = re.findall(r"\[([^\]]*)\]", title)
@@ -1461,6 +1465,8 @@ class MediaPipeline(_PluginBase):
             if re.fullmatch(r"[\d.\-_]+", c):
                 continue
             if MediaPipeline._ANIME_SKIP_RE.search(c):
+                continue
+            if MediaPipeline._TAG_REJECT.search(c):     # 域名/字幕标签块，不是剧名
                 continue
             c2 = re.split(r"(?i)\s+S\d{1,2}\b|\s*\((?:19|20)\d{2}\)|\s+\d{1,3}-\d{1,3}\b", c)[0]
             c2 = re.sub(r"\s+", " ", c2).strip(" .-_·!&")
@@ -1516,6 +1522,11 @@ class MediaPipeline(_PluginBase):
 
     @staticmethod
     def _heuristic_clean_title(title: str) -> str:
+        # 先剥「站点/域名」方括号前缀（[bdys.me] / [ 不太灵…www.butailing.com ] / [哔嘀影视-bde4.com]），
+        # 否则会被当成番剧组名或误选为标题；剥完若不再以 [ 开头就走普通路径（在技术标记处截断取剧名）
+        title = re.sub(
+            r"^\s*\[[^\]]*(?:\.(?:com|net|cc|me|tv|org|cn)|影视|公益|发布|下载|资源)[^\]]*\]\s*",
+            "", title)
         if title.lstrip().startswith("["):
             cand = MediaPipeline._pick_anime_title(title)
             if cand:

@@ -2,7 +2,7 @@
   "id": "MediaPipeline",
   "name": "媒体入库流水线",
   "description": "四步合一：OpenList扫描生成STRM→网盘改名清洗(改115源防insert复活)→MP增量整理刮削→Emby全库扫描，各步独立开关",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "author": "yahoo2022",
   "author_url": "https://github.com/yahoo2022",
   "icon": "workflow.png",
