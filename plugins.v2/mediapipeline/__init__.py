@@ -62,7 +62,7 @@ class MediaPipeline(_PluginBase):
     plugin_name = "媒体入库流水线"
     plugin_desc = "四步合一：OpenList扫描→网盘改名清洗(改115源防复活)→MP增量整理刮削→Emby全库扫描，各步独立开关"
     plugin_icon = "workflow.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.2"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "mediapipeline_"
