@@ -66,7 +66,7 @@ class MediaPipeline(_PluginBase):
     plugin_name = "媒体入库流水线"
     plugin_desc = "四步合一：OpenList扫描→网盘改名清洗(改115源防复活)→MP增量整理刮削→Emby全库扫描，各步独立开关"
     plugin_icon = "workflow.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "mediapipeline_"
@@ -156,6 +156,7 @@ class MediaPipeline(_PluginBase):
     _rl_pause_max: float = 120.0
     _rl_max_ops: int = 300        # 单次运行 115 写操作上限，到顶即停
     _rl_shuffle: bool = True      # 打乱处理顺序
+    _rn_fail_ratio: float = 0.2   # 步骤2「真失败」占比超过此值才判整步失败(幽灵不计)，默认 20%
 
     # ---- 步骤3：增量整理刮削 ----
     _src_paths: str = ""
@@ -240,6 +241,7 @@ class MediaPipeline(_PluginBase):
             self._rl_pause_max = float(config.get("rl_pause_max") or 120.0)
             self._rl_max_ops = int(config.get("rl_max_ops") or 300)
             self._rl_shuffle = config.get("rl_shuffle", True)
+            self._rn_fail_ratio = float(config.get("rn_fail_ratio") if config.get("rn_fail_ratio") is not None else 0.2)
 
             self._src_paths = config.get("src_paths") or ""
             self._recent_days = int(config.get("recent_days") or 0)
@@ -301,6 +303,7 @@ class MediaPipeline(_PluginBase):
             "rl_min": self._rl_min, "rl_max": self._rl_max, "rl_batch": self._rl_batch,
             "rl_pause_min": self._rl_pause_min, "rl_pause_max": self._rl_pause_max,
             "rl_max_ops": self._rl_max_ops, "rl_shuffle": self._rl_shuffle,
+            "rn_fail_ratio": self._rn_fail_ratio,
             "src_paths": self._src_paths, "recent_days": self._recent_days,
             "transfer_unit": self._transfer_unit, "transfer_type": self._transfer_type,
             "mtype": self._mtype, "target_path": self._target_path, "scrape": self._scrape,
@@ -907,11 +910,15 @@ class MediaPipeline(_PluginBase):
             return False
         return True
 
-    def _after_write(self, ok: bool):
-        """一次 115 写操作后的节奏：计数 + 限速 sleep + 批次长停 + 错误退避。"""
+    def _after_write(self, ok: bool, ghost: bool = False):
+        """一次 115 写操作后的节奏：计数 + 限速 sleep + 批次长停 + 错误退避。
+        ghost=True：失败原因是「115 源已不存在」(object not found)，不是风控/限流，
+        按中性处理——不退避、不累加连续失败计数，只照常限速，避免幽灵把整轮拖进硬中止。"""
         self._op_count += 1
         if ok:
             self._consecutive_fail = 0
+        elif ghost:
+            pass  # 幽灵：源不存在，不是风控信号，连续失败计数保持不动、不退避
         else:
             self._consecutive_fail += 1
             backoff = [5, 15, 45][min(self._consecutive_fail - 1, 2)]
@@ -926,6 +933,17 @@ class MediaPipeline(_PluginBase):
             pause = random.uniform(self._rl_pause_min, self._rl_pause_max)
             logger.info(f"[{self.plugin_name}] 已写 {self._op_count} 个，长停 {int(pause)}s（防风控）")
             time.sleep(pause)
+
+    @staticmethod
+    def _is_source_gone(err: str) -> bool:
+        """判断 OpenList 写失败是否因「115 源不存在」(幽灵)，以区别于风控/限流/网络等真失败。
+        典型：code=500 failed to get src object: object not found。
+        注意只匹配"不存在"类，不匹配 429/限流/timeout(那些应正常退避重试)。"""
+        e = (err or "").lower()
+        return ("object not found" in e
+                or "not found" in e
+                or "no such file" in e
+                or "does not exist" in e)
 
     # ---- strm 内容 <-> 115 源路径 ----
 
@@ -991,7 +1009,8 @@ class MediaPipeline(_PluginBase):
 
         cutoff_ts = self._rn_cutoff_ts()
         stat = {"scanned": 0, "renamed": 0, "junked": 0, "skipped": 0,
-                "conflicts": 0, "failed": 0, "date_skipped": 0, "dirs_renamed": 0}
+                "conflicts": 0, "failed": 0, "date_skipped": 0, "dirs_renamed": 0,
+                "ghost": 0}
         details: List[Tuple[str, str, str, str]] = []
         reason_count: Dict[str, int] = {}
 
@@ -1031,7 +1050,7 @@ class MediaPipeline(_PluginBase):
             date_info = f"\n日期过滤：仅最近 {self._rn_recent_days} 天，跳过旧文件 {stat['date_skipped']}"
         msg = (f"{mode}完成：扫描 {stat['scanned']}，目录改名 {stat['dirs_renamed']}，"
                f"文件改名 {stat['renamed']}，清垃圾 {stat['junked']}，跳过 {stat['skipped']}，"
-               f"冲突 {stat['conflicts']}，失败 {stat['failed']}"
+               f"冲突 {stat['conflicts']}，幽灵 {stat['ghost']}，失败 {stat['failed']}"
                f"{date_info}\n跳过原因分布：{skip_brief}")
         if not self._rn_dry_run:
             msg += f"\n115 写操作：{self._op_count} 次"
@@ -1039,6 +1058,9 @@ class MediaPipeline(_PluginBase):
             msg += f"\n⚠️ 已达单次写操作上限 {self._rl_max_ops}，剩余留待下次运行（防风控）"
         if self._aborted_backoff:
             msg += "\n⚠️ 连续多次失败已中止本轮网盘写操作（疑似风控/限流），请稍后再试"
+        if stat["ghost"]:
+            msg += (f"\nℹ️ 幽灵 {stat['ghost']} 个：115 源已不存在、本地 strm 是死指针，不计失败；"
+                    f"建议在服务器跑 security/scripts/strm-ghost-clean.py 清理本地残留")
 
         report_path = self._write_report(mode, msg, details)
         if report_path:
@@ -1046,7 +1068,11 @@ class MediaPipeline(_PluginBase):
             msg += f"\n\n下载本次报告（直接复制）：\ndocker cp {self._container}:{report_path} ./"
         logger.info(f"[{self.plugin_name}] {msg}")
 
-        ok = (stat["failed"] == 0) and (not self._aborted_backoff)
+        # 成功判定：硬中止(连续失败/风控)必判失败；否则只有「真失败」占比超过阈值才判失败。
+        # 幽灵(源不存在)不计入 failed；个别瞬时失败不再让整步 ❌ 而误中止步骤3/4。
+        real_writes = stat["renamed"] + stat["junked"] + stat["dirs_renamed"] + stat["failed"]
+        fail_ratio = (stat["failed"] / real_writes) if real_writes else 0.0
+        ok = (not self._aborted_backoff) and (fail_ratio <= self._rn_fail_ratio)
         return ok, msg
 
     def _clean_dir_names(self, root: Path, cutoff_ts: Optional[float],
@@ -1110,6 +1136,12 @@ class MediaPipeline(_PluginBase):
                 details.append(("SKIP", "capped", str(d), "达上限，留待下次"))
                 return
             ok, err = self._ol_rename(dir_115, new)
+            if not ok and self._is_source_gone(err):
+                self._after_write(False, ghost=True)
+                stat["ghost"] += 1
+                details.append(("GHOST", "dir_source_gone", str(d),
+                                f"115 源目录不存在，本地幽灵(建议 strm-ghost-clean.py 清理): {dir_115}"))
+                continue
             self._after_write(ok)
             if not ok:
                 stat["failed"] += 1
@@ -1229,6 +1261,12 @@ class MediaPipeline(_PluginBase):
             details.append(("SKIP", "capped", str(strm), "达上限，留待下次"))
             return
         ok, err = self._ol_rename(src_115, new_media)
+        if not ok and self._is_source_gone(err):
+            self._after_write(False, ghost=True)
+            stat["ghost"] += 1
+            details.append(("GHOST", "source_gone", str(strm),
+                            f"115 源不存在，本地幽灵(建议 strm-ghost-clean.py 清理): {src_115}"))
+            return
         self._after_write(ok)
         if not ok:
             stat["failed"] += 1
@@ -1260,6 +1298,17 @@ class MediaPipeline(_PluginBase):
             parent = src_115.rsplit("/", 1)[0]
             name = src_115.rstrip("/").split("/")[-1]
             ok, err = self._ol_remove(parent, name)
+            if not ok and self._is_source_gone(err):
+                # 115 源已不存在，等于垃圾已删；本地 strm 直接清掉，不计失败
+                self._after_write(False, ghost=True)
+                try:
+                    strm.unlink()
+                except OSError:
+                    pass
+                stat["ghost"] += 1
+                details.append(("GHOST", "source_gone", str(strm),
+                                f"115 源已不在(视为已删)，删本地幽灵: {src_115}"))
+                return
             self._after_write(ok)
         if ok:
             try:
