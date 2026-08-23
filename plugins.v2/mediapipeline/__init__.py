@@ -66,7 +66,7 @@ class MediaPipeline(_PluginBase):
     plugin_name = "媒体入库流水线"
     plugin_desc = "四步合一：OpenList扫描→网盘改名清洗(改115源防复活)→MP增量整理刮削→Emby全库扫描，各步独立开关"
     plugin_icon = "workflow.png"
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "mediapipeline_"
@@ -178,6 +178,9 @@ class MediaPipeline(_PluginBase):
     _emby_apikey: str = ""
 
     _scheduler: Optional[BackgroundScheduler] = None
+    # 流水线重入锁：正在跑时再次触发（双击保存 / Cron 撞手动 / Webhook）直接跳过，
+    # 避免两轮并发写 115（写频率翻倍触发风控）+ 共享防风控计数器互相踩。类级共享，全程不重置。
+    _run_lock = threading.Lock()
 
     # 运行期状态（步骤2 防风控计数，每次运行重置）
     _op_count: int = 0
@@ -380,6 +383,7 @@ class MediaPipeline(_PluginBase):
 
     def _run_step(self, name: str, func) -> Tuple[bool, str]:
         """在子线程执行单步，套「单步超时」兜底。func 返回 (ok, summary)。"""
+        logger.info(f"[{self.plugin_name}] ── 开始：{name}")
         result: Dict[str, Any] = {}
 
         def _worker():
@@ -408,53 +412,76 @@ class MediaPipeline(_PluginBase):
         return ok, f"{summary}（耗时 {elapsed} 秒）"
 
     def _run_task(self):
-        """四步串行：扫描 → 网盘改名清洗 → 增量整理刮削 → Emby 扫描。各步独立开关。"""
-        if not any([self._do_scan, self._do_rename, self._do_transfer, self._do_emby]):
-            self._send_notify("流水线未执行", "四个步骤开关都关闭了，没有可执行的步骤")
+        """四步串行：扫描 → 网盘改名清洗 → 增量整理刮削 → Emby 扫描。各步独立开关。
+        重入锁保护：正在执行时再次触发（双击保存 / Cron 撞手动 / Webhook）直接跳过，
+        避免两轮并发写 115（写频率翻倍触发风控）与共享计数器互相踩。"""
+        if not self._run_lock.acquire(blocking=False):
+            logger.warning(f"[{self.plugin_name}] ⏸ 上一轮流水线仍在执行，本次触发已跳过（防并发写 115/重复整理）")
+            self._send_notify("流水线跳过（上一轮还在跑）",
+                              "检测到上一轮流水线仍在执行，本次触发已跳过，避免并发操作 115、重复整理。\n"
+                              "等上一轮结束后再手动触发即可。")
             return
+        try:
+            if not any([self._do_scan, self._do_rename, self._do_transfer, self._do_emby]):
+                self._send_notify("流水线未执行", "四个步骤开关都关闭了，没有可执行的步骤")
+                return
 
-        summary_parts: List[str] = []
-        aborted = False
+            enabled = []
+            if self._do_scan:
+                enabled.append("①扫描")
+            if self._do_rename:
+                enabled.append("②改名清洗" + ("(预演)" if self._rn_dry_run else ""))
+            if self._do_transfer:
+                enabled.append("③整理刮削")
+            if self._do_emby:
+                enabled.append("④Emby扫描")
+            logger.info(f"[{self.plugin_name}] ▶ 流水线开始执行，启用步骤：{' + '.join(enabled)}")
 
-        # 步骤1 OpenList 扫描
-        if self._do_scan:
-            ok, s = self._run_step("步骤1 OpenList 扫描", self._run_scan)
-            summary_parts.append(f"【步骤1 OpenList 扫描】{'✅' if ok else '❌'}\n{s}")
-            if not ok and self._stop_on_error:
-                summary_parts.append("⚠️ 步骤1未成功，已按「出错即中止」停止后续")
-                aborted = True
-        else:
-            summary_parts.append("【步骤1 OpenList 扫描】已跳过（开关关闭）")
+            summary_parts: List[str] = []
+            aborted = False
 
-        # 步骤2 网盘改名清洗
-        if not aborted and self._do_rename:
-            ok, s = self._run_step("步骤2 网盘改名清洗", self._run_rename)
-            summary_parts.append(f"【步骤2 网盘改名清洗】{'✅' if ok else '❌'}\n{s}")
-            if not ok and self._stop_on_error:
-                summary_parts.append("⚠️ 步骤2未成功，已按「出错即中止」停止后续")
-                aborted = True
-        elif not self._do_rename:
-            summary_parts.append("【步骤2 网盘改名清洗】已跳过（开关关闭）")
+            # 步骤1 OpenList 扫描
+            if self._do_scan:
+                ok, s = self._run_step("步骤1 OpenList 扫描", self._run_scan)
+                summary_parts.append(f"【步骤1 OpenList 扫描】{'✅' if ok else '❌'}\n{s}")
+                if not ok and self._stop_on_error:
+                    summary_parts.append("⚠️ 步骤1未成功，已按「出错即中止」停止后续")
+                    aborted = True
+            else:
+                summary_parts.append("【步骤1 OpenList 扫描】已跳过（开关关闭）")
 
-        # 步骤3 增量整理刮削
-        if not aborted and self._do_transfer:
-            ok, s = self._run_step("步骤3 增量整理刮削", self._run_transfer)
-            summary_parts.append(f"【步骤3 增量整理刮削】{'✅' if ok else '❌'}\n{s}")
-            if not ok and self._stop_on_error:
-                summary_parts.append("⚠️ 步骤3未成功，已按「出错即中止」停止后续")
-                aborted = True
-        elif not self._do_transfer:
-            summary_parts.append("【步骤3 增量整理刮削】已跳过（开关关闭）")
+            # 步骤2 网盘改名清洗
+            if not aborted and self._do_rename:
+                ok, s = self._run_step("步骤2 网盘改名清洗", self._run_rename)
+                summary_parts.append(f"【步骤2 网盘改名清洗】{'✅' if ok else '❌'}\n{s}")
+                if not ok and self._stop_on_error:
+                    summary_parts.append("⚠️ 步骤2未成功，已按「出错即中止」停止后续")
+                    aborted = True
+            elif not self._do_rename:
+                summary_parts.append("【步骤2 网盘改名清洗】已跳过（开关关闭）")
 
-        # 步骤4 Emby 全库扫描
-        if not aborted and self._do_emby:
-            ok, s = self._run_step("步骤4 Emby 媒体库扫描", self._run_emby_scan)
-            summary_parts.append(f"【步骤4 Emby 媒体库扫描】{'✅' if ok else '❌'}\n{s}")
-        elif not self._do_emby:
-            summary_parts.append("【步骤4 Emby 媒体库扫描】已跳过（开关关闭）")
+            # 步骤3 增量整理刮削
+            if not aborted and self._do_transfer:
+                ok, s = self._run_step("步骤3 增量整理刮削", self._run_transfer)
+                summary_parts.append(f"【步骤3 增量整理刮削】{'✅' if ok else '❌'}\n{s}")
+                if not ok and self._stop_on_error:
+                    summary_parts.append("⚠️ 步骤3未成功，已按「出错即中止」停止后续")
+                    aborted = True
+            elif not self._do_transfer:
+                summary_parts.append("【步骤3 增量整理刮削】已跳过（开关关闭）")
 
-        title = "媒体入库流水线完成" if not aborted else "媒体入库流水线中止（含失败）"
-        self._send_notify(title, "\n\n".join(summary_parts))
+            # 步骤4 Emby 全库扫描
+            if not aborted and self._do_emby:
+                ok, s = self._run_step("步骤4 Emby 媒体库扫描", self._run_emby_scan)
+                summary_parts.append(f"【步骤4 Emby 媒体库扫描】{'✅' if ok else '❌'}\n{s}")
+            elif not self._do_emby:
+                summary_parts.append("【步骤4 Emby 媒体库扫描】已跳过（开关关闭）")
+
+            title = "媒体入库流水线完成" if not aborted else "媒体入库流水线中止（含失败）"
+            logger.info(f"[{self.plugin_name}] ■ 流水线结束：{title}")
+            self._send_notify(title, "\n\n".join(summary_parts))
+        finally:
+            self._run_lock.release()
 
     # ==================== 步骤1：OpenList 扫描 ====================
 
