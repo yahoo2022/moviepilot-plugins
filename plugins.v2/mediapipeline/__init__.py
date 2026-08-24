@@ -66,7 +66,7 @@ class MediaPipeline(_PluginBase):
     plugin_name = "媒体入库流水线"
     plugin_desc = "四步合一：OpenList扫描→网盘改名清洗(改115源防复活)→MP增量整理刮削→Emby全库扫描，各步独立开关"
     plugin_icon = "workflow.png"
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "mediapipeline_"
@@ -1650,6 +1650,8 @@ class MediaPipeline(_PluginBase):
     def _post_clean_title(t: str) -> str:
         t = re.sub(r"\[[^\]]*\]", " ", t)
         t = re.sub(r"【[^】]*】", " ", t)
+        t = re.sub(r"『[^』]*』", " ", t)
+        t = re.sub(r"「[^」]*」", " ", t)
         t = re.sub(r"\s+", " ", t).strip(" .-_·!&")
         t = re.sub(r"\s+(?:19|20)\d{2}$", "", t).strip()
         t = re.sub(r"\s*第\s*[0-9一二三四五六七八九十]+\s*季\s*$", "", t).strip()
@@ -1672,6 +1674,8 @@ class MediaPipeline(_PluginBase):
                 return cand
         t = title
         t = re.sub(r"【[^】]*】", " ", t)
+        t = re.sub(r"『[^』]*』", " ", t)
+        t = re.sub(r"「[^」]*」", " ", t)
         t = re.sub(r"\[[^\]]*\]", " ", t)
         t = re.sub(r"(?i)\b(?:www\.)?[a-z0-9-]+\.(?:com|net|cc|me|tv|xyz|org|cn)\b", " ", t)
         t = re.sub(r"\s+", " ", t).strip(" .-_·")
