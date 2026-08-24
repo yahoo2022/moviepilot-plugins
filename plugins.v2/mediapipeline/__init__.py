@@ -66,7 +66,7 @@ class MediaPipeline(_PluginBase):
     plugin_name = "媒体入库流水线"
     plugin_desc = "四步合一：OpenList扫描→网盘改名清洗(改115源防复活)→MP增量整理刮削→Emby全库扫描，各步独立开关"
     plugin_icon = "workflow.png"
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "mediapipeline_"
@@ -1367,10 +1367,24 @@ class MediaPipeline(_PluginBase):
             return ""
         year = self._extract_year(name)
         new = f"{title} ({year})" if (year and str(year) not in title) else title
+        # 保留清晰度后缀（如 2160p/1080p）：便于人眼看画质，也让不同画质的重复目录区分开
+        res = self._extract_res(name)
+        if res:
+            new = f"{new} {res}"
         new = self._safe_name(new).strip()
         if not new or new == name.strip() or len(new) < 2:
             return ""
         return new
+
+    @staticmethod
+    def _extract_res(name: str) -> str:
+        """从原名提取清晰度后缀(2160p/1080p/720p/4k/8k 等)，保留到清洗后的目录名。
+        取首个匹配、小写；4k/uhd 归一为 2160p。MP 识别时会忽略结尾清晰度，不影响识别。"""
+        m = re.search(r"(?i)\b(2160p|1440p|1080p|1080i|720p|576p|480p|4k|8k|uhd)\b", name)
+        if not m:
+            return ""
+        r = m.group(1).lower()
+        return "2160p" if r in ("4k", "uhd") else r
 
     @staticmethod
     def _extract_year(name: str) -> Optional[int]:
