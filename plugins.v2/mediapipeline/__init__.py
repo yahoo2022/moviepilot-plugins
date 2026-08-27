@@ -66,7 +66,7 @@ class MediaPipeline(_PluginBase):
     plugin_name = "媒体入库流水线"
     plugin_desc = "四步合一：OpenList扫描→网盘改名清洗(改115源防复活)→MP增量整理刮削→Emby全库扫描，各步独立开关"
     plugin_icon = "workflow.png"
-    plugin_version = "1.0.7"
+    plugin_version = "1.0.8"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "mediapipeline_"
@@ -1701,9 +1701,11 @@ class MediaPipeline(_PluginBase):
             t, maxsplit=1)
         t = cut[0] if cut else t
         t = t.strip(" .-_·")
-        cjk = re.match(r"^([\u4e00-\u9fff0-9：·\s]+)", t)
-        if cjk and re.search(r"[\u4e00-\u9fff]", cjk.group(1)):
-            t = cjk.group(1)
+        # 中英混排取中文：仅当「中文前缀 + 纯英文/技术尾巴」时才截断(如 火影忍者Naruto → 火影忍者)；
+        # 若英文后还有中文(如 哆啦A梦、A梦这种夹在中间的拉丁)则保留整名，避免 哆啦A梦→哆啦、地。…→地
+        m = re.match(r"^([\u4e00-\u9fff0-9：·\s]+?)([A-Za-z].*)$", t)
+        if m and re.search(r"[\u4e00-\u9fff]", m.group(1)) and not re.search(r"[\u4e00-\u9fff]", m.group(2)):
+            t = m.group(1).strip()
         return re.sub(r"\s+", " ", t).strip(" .-_·")
 
     @staticmethod
