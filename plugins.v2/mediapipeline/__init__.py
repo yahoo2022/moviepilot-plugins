@@ -64,9 +64,9 @@ except Exception:
 class MediaPipeline(_PluginBase):
     # 插件元数据
     plugin_name = "媒体入库流水线"
-    plugin_desc = "四步合一：OpenList扫描→网盘改名清洗(改115源防复活)→MP增量整理刮削→Emby全库扫描，各步独立开关"
+    plugin_desc = "四步合一：OpenList扫描→保守网盘改名清洗→MP增量整理刮削(TV/Movie双组可选)→Emby全库扫描"
     plugin_icon = "workflow.png"
-    plugin_version = "1.0.8"
+    plugin_version = "1.1.0"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "mediapipeline_"
@@ -159,6 +159,12 @@ class MediaPipeline(_PluginBase):
     _rn_fail_ratio: float = 0.2   # 步骤2「真失败」占比超过此值才判整步失败(幽灵不计)，默认 20%
 
     # ---- 步骤3：增量整理刮削 ----
+    # 兼容模式沿用原 src_paths/mtype/target_path；双组模式固定 TV→Movie 顺序和媒体类型。
+    _transfer_grouped: bool = False
+    _transfer_tv_paths: str = "/media/TV"
+    _transfer_tv_target_path: str = ""
+    _transfer_movie_paths: str = "/media/Movie"
+    _transfer_movie_target_path: str = ""
     _src_paths: str = ""
     _recent_days: int = 3
     _transfer_unit: str = "folder"
@@ -246,6 +252,13 @@ class MediaPipeline(_PluginBase):
             self._rl_shuffle = config.get("rl_shuffle", True)
             self._rn_fail_ratio = float(config.get("rn_fail_ratio") if config.get("rn_fail_ratio") is not None else 0.2)
 
+            self._transfer_grouped = config.get("transfer_grouped", False)
+            self._transfer_tv_paths = (config.get("transfer_tv_paths")
+                                       if config.get("transfer_tv_paths") is not None else "/media/TV")
+            self._transfer_tv_target_path = (config.get("transfer_tv_target_path") or "").strip()
+            self._transfer_movie_paths = (config.get("transfer_movie_paths")
+                                          if config.get("transfer_movie_paths") is not None else "/media/Movie")
+            self._transfer_movie_target_path = (config.get("transfer_movie_target_path") or "").strip()
             self._src_paths = config.get("src_paths") or ""
             self._recent_days = int(config.get("recent_days") or 0)
             self._transfer_unit = config.get("transfer_unit") or "folder"
@@ -307,6 +320,11 @@ class MediaPipeline(_PluginBase):
             "rl_pause_min": self._rl_pause_min, "rl_pause_max": self._rl_pause_max,
             "rl_max_ops": self._rl_max_ops, "rl_shuffle": self._rl_shuffle,
             "rn_fail_ratio": self._rn_fail_ratio,
+            "transfer_grouped": self._transfer_grouped,
+            "transfer_tv_paths": self._transfer_tv_paths,
+            "transfer_tv_target_path": self._transfer_tv_target_path,
+            "transfer_movie_paths": self._transfer_movie_paths,
+            "transfer_movie_target_path": self._transfer_movie_target_path,
             "src_paths": self._src_paths, "recent_days": self._recent_days,
             "transfer_unit": self._transfer_unit, "transfer_type": self._transfer_type,
             "mtype": self._mtype, "target_path": self._target_path, "scrape": self._scrape,
@@ -654,17 +672,22 @@ class MediaPipeline(_PluginBase):
                 exts.add(e)
         return exts
 
-    def _mtype_enum(self):
-        if not self._mtype:
+    @staticmethod
+    def _mtype_enum(mtype_value: str, strict: bool = False):
+        if not mtype_value:
             return None
         try:
             from app.schemas.types import MediaType
-            if self._mtype == "电影":
+            if mtype_value == "电影":
                 return MediaType.MOVIE
-            if self._mtype == "电视剧":
+            if mtype_value == "电视剧":
                 return MediaType.TV
-        except Exception:
+        except Exception as e:
+            if strict:
+                raise RuntimeError(f"固定媒体类型加载失败: {e}") from e
             return None
+        if strict:
+            raise ValueError(f"不支持的固定媒体类型: {mtype_value}")
         return None
 
     def _scrape_val(self) -> Optional[bool]:
@@ -682,8 +705,65 @@ class MediaPipeline(_PluginBase):
             return False
         return None
 
+    @staticmethod
+    def _normalized_abs_path(path: str) -> str:
+        """规范化绝对路径并解析现有符号链接，避免同一源目录以别名进入两个组。"""
+        normalized = os.path.abspath(os.path.normpath(os.path.expanduser(path)))
+        return os.path.normcase(os.path.realpath(normalized))
+
+    def _grouped_source_conflict(self, tv_paths: List[str], movie_paths: List[str]) -> str:
+        """双组源不能相同或互相嵌套，避免同一媒体被按两种类型重复处理。"""
+        for tv_path in tv_paths:
+            tv_norm = self._normalized_abs_path(tv_path)
+            for movie_path in movie_paths:
+                movie_norm = self._normalized_abs_path(movie_path)
+                try:
+                    common = os.path.commonpath([tv_norm, movie_norm])
+                except ValueError:
+                    continue
+                if common in (tv_norm, movie_norm):
+                    return (f"TV/Movie 源路径相同或互相嵌套，已拒绝执行: "
+                            f"TV={tv_path}，Movie={movie_path}")
+        return ""
+
     def _run_transfer(self) -> Tuple[bool, str]:
-        src_paths = self._split_paths(self._src_paths)
+        if not self._transfer_grouped:
+            # 旧配置默认进入这里，继续使用原 src_paths/mtype/target_path 和原 Cron 行为。
+            return self._run_transfer_group(
+                self._src_paths, self._target_path, self._mtype,
+                strict_mtype=False)
+
+        tv_paths = self._split_paths(self._transfer_tv_paths)
+        movie_paths = self._split_paths(self._transfer_movie_paths)
+        if not tv_paths and not movie_paths:
+            return False, "双组模式下 TV、Movie 源目录都未配置"
+
+        conflict = self._grouped_source_conflict(tv_paths, movie_paths)
+        if conflict:
+            logger.error(f"[{self.plugin_name}] {conflict}")
+            return False, conflict
+
+        summaries: List[str] = []
+        overall_ok = True
+        # 固定顺序：TV 组完整扫描、整理并汇总结束后，才开始 Movie 组。
+        groups = (
+            ("TV", self._transfer_tv_paths, self._transfer_tv_target_path, "电视剧"),
+            ("Movie", self._transfer_movie_paths, self._transfer_movie_target_path, "电影"),
+        )
+        for label, src_raw, target_path, mtype_value in groups:
+            if not self._split_paths(src_raw):
+                summaries.append(f"【{label}】已跳过（源目录未配置）")
+                continue
+            ok, summary = self._run_transfer_group(
+                src_raw, target_path, mtype_value, strict_mtype=True)
+            summaries.append(f"【{label}】{'✅' if ok else '❌'}\n{summary}")
+            if not ok:
+                overall_ok = False
+        return overall_ok, "\n\n".join(summaries)
+
+    def _run_transfer_group(self, src_raw: str, target_path: str,
+                            mtype_value: str, strict_mtype: bool) -> Tuple[bool, str]:
+        src_paths = self._split_paths(src_raw)
         if not src_paths:
             return False, "源目录未配置，跳过整理"
         cutoff_ts: Optional[float] = None
@@ -720,7 +800,9 @@ class MediaPipeline(_PluginBase):
                 text += "\n" + "\n".join(scan_errs)
             return (not scan_errs), text
 
-        ok_list, fail_list = self._do_transfer_targets(all_targets)
+        ok_list, fail_list = self._do_transfer_targets(
+            all_targets, mtype_value=mtype_value, target_path=target_path,
+            strict_mtype=strict_mtype)
         parts = [f"模式: {mode}，待整理 {len(all_targets)} 项"]
         if ok_list:
             parts.append(f"已完成 {len(ok_list)} 项:\n" + "\n".join(ok_list[:20])
@@ -780,20 +862,26 @@ class MediaPipeline(_PluginBase):
                     targets[str(root / rel_parts[0])] = "dir"
         return list(targets.items())
 
-    def _do_transfer_targets(self, targets: List[Tuple[str, str]]) -> Tuple[List[str], List[str]]:
+    def _do_transfer_targets(self, targets: List[Tuple[str, str]],
+                             mtype_value: str, target_path: str,
+                             strict_mtype: bool = False) -> Tuple[List[str], List[str]]:
         try:
             from app.chain.transfer import TransferChain
             from app.schemas import FileItem
         except Exception as e:
             logger.error(f"[{self.plugin_name}] 导入 MP 内部模块失败: {e}")
             return [], [f"导入模块异常: {e}"]
+        try:
+            mtype = self._mtype_enum(mtype_value, strict=strict_mtype)
+        except Exception as e:
+            logger.error(f"[{self.plugin_name}] 媒体类型配置失败: {e}")
+            return [], [str(e)]
         chain = TransferChain()
-        mtype = self._mtype_enum()
         scrape = self._scrape_val()
         type_folder = self._tri_val(self._type_folder)
         category_folder = self._tri_val(self._category_folder)
         ttype = self._transfer_type or None
-        target = Path(self._target_path) if self._target_path else None
+        target = Path(target_path) if target_path else None
         ok_list: List[str] = []
         fail_list: List[str] = []
         for path_str, ftype in targets:
@@ -1598,9 +1686,120 @@ class MediaPipeline(_PluginBase):
             return True
         return False
 
-    # 番剧候选里要拒绝的块：域名(bdys.me/xxx.com) / 字幕·音轨标签(简繁内封/中文字幕/国语配音…)——都不是剧名
-    _TAG_REJECT = re.compile(
-        r"(?i)(\.(?:com|net|cc|me|tv|org|cn)\b|内封|内嵌|外挂|字幕|中字|配音|音轨|双语|简繁|无字)")
+    # 全角标题块只拒绝“整块可确认是元数据”的内容。严禁用“广告/Studio”等裸子串判断，
+    # 否则《广告狂人》《The Studio》这类正式片名会被不可逆地截断。
+    _DOMAIN_TAG_RE = re.compile(
+        r"(?i)(?:https?://|www\.|(?:^|[^a-z0-9])(?:[a-z0-9-]+\.)+(?:com|net|cc|me|tv|org|cn|xyz)\b)"
+    )
+    _DIRTY_TAG_EXACT_RE = re.compile(
+        r"(?i)^(?:发布(?:站|组)?|字幕组|压制组|广告|网址|官网|资源|下载|影视站|"
+        r"电影港|电影天堂|陽光电影|阳光电影|6v电影|高清影视之家|高清剧集网|不太灵影视)$"
+    )
+    _METADATA_TAG_RE = re.compile(
+        r"(?i)^(?:(?:内封|内嵌|外挂|字幕|中字|配音|音轨|双语|简繁|无字|国语|粤语|"
+        r"raws?|rip|subs?|fansub|全集|特典|menu|bilibili|baha|b-global|"
+        r"chs|cht|jpn|eng|big5|hi10p|ma10p|sp|ova|cm)"
+        r"(?:[\s+&/·、，,._-]*))*$"
+    )
+    _FULLWIDTH_BLOCK_RE = re.compile(r"【([^】]*)】|『([^』]*)』|「([^」]*)」")
+    _PURE_TECH_TOKEN_RE = re.compile(
+        r"(?i)^(?:tv|movie|bd|bdrip|blu-?ray|web|web-?dl|webrip|remux|hdtv|uhd|"
+        r"4k|8k|2160p|1440p|1080p|1080i|720p|576p|480p|hdr|sdr|dv|dovi|"
+        r"h\.?26[45]|x26[45]|hevc|avc|10bit|8bit|60fps|aac|flac|opus|ac-?3|e-?ac-?3|"
+        r"dts(?:-?hd)?|ddp?5\.?1|atmos|ma|mkv|mp4|raws?|rip)$"
+    )
+
+    @staticmethod
+    def _is_rejected_title_block(content: str) -> bool:
+        """仅拒绝可结构化确认的站点、发布标签、字幕音轨或纯技术块。"""
+        text = re.sub(r"\s+", " ", (content or "")).strip(" .-_·!&")
+        if not text:
+            return True
+        if MediaPipeline._DOMAIN_TAG_RE.search(text):
+            return True
+        if MediaPipeline._DIRTY_TAG_EXACT_RE.fullmatch(text):
+            return True
+        if MediaPipeline._METADATA_TAG_RE.fullmatch(text):
+            return True
+        tech_text = re.sub(r"(?i)h\.(?=26[45])", "h", text)
+        tech_text = re.sub(r"(?i)(ddp?5)\.1", r"\g<1>1", tech_text)
+        tech_parts = [p for p in re.split(r"[\s._+/]+", tech_text) if p]
+        return bool(tech_parts) and all(
+            MediaPipeline._PURE_TECH_TOKEN_RE.fullmatch(p) for p in tech_parts)
+
+    @staticmethod
+    def _is_low_confidence_title(title: str) -> bool:
+        """拒绝明显只是媒体标签/季号/单字的结果，宁可跳过也不执行不可逆改名。"""
+        t = re.sub(r"\s+", " ", (title or "")).strip(" .-_·!&")
+        if not t:
+            return True
+        if re.fullmatch(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", t):
+            return True
+        if re.fullmatch(r"(?i)(?:tv|bd|web|movie)", t):
+            return True
+        if re.fullmatch(
+                r"(?i)(?:第\s*[0-9一二三四五六七八九十]+(?:\s*季)?|Season\s*\d+|S\d{1,2})", t):
+            return True
+        tech_text = re.sub(r"(?i)h\.(?=26[45])", "h", t)
+        tech_text = re.sub(r"(?i)(ddp?5)\.1", r"\g<1>1", tech_text)
+        tech_parts = [p for p in re.split(r"[\s._+/]+", tech_text) if p]
+        if tech_parts and all(MediaPipeline._PURE_TECH_TOKEN_RE.fullmatch(p) for p in tech_parts):
+            return True
+        return False
+
+    @staticmethod
+    def _has_explicit_season_suffix(suffix: str) -> bool:
+        """季号后必须结束或跟明确分隔/年份/技术信息，避免误认 Season 24 Hours。"""
+        match = re.match(
+            r"^\s*(?:第\s*[0-9一二三四五六七八九十]+\s*季|(?i:Season\s*\d+))",
+            suffix or "")
+        if not match:
+            return False
+        remainder = (suffix or "")[match.end():]
+        stripped = remainder.strip()
+        if not stripped:
+            return True
+        # 分隔符本身不是充分证据；去掉后仍必须是年份或技术元数据。
+        payload = re.sub(r"^[._\-·(（\[【『「\s]+", "", remainder)
+        if not payload.strip():
+            return True
+        return bool(re.match(
+            r"^(?:\(?(?:19|20)\d{2}\)?\b|2160p\b|1440p\b|1080[pi]?\b|720p\b|"
+            r"576p\b|480p\b|4k\b|8k\b|uhd\b|hdr\b|web-?dl\b|webrip\b|"
+            r"blu-?ray\b|bdrip\b|remux\b|hdtv\b)",
+            payload.strip(), re.IGNORECASE))
+
+    @staticmethod
+    def _explicit_fullwidth_title(title: str) -> str:
+        """只在「正式标题块后紧跟明确季标记」时采用块内标题，避免把后续别名一并写入。"""
+        for match in MediaPipeline._FULLWIDTH_BLOCK_RE.finditer(title or ""):
+            content = next((g for g in match.groups() if g is not None), "").strip()
+            if MediaPipeline._is_rejected_title_block(content):
+                continue
+            suffix = (title or "")[match.end():]
+            if MediaPipeline._has_explicit_season_suffix(suffix):
+                return MediaPipeline._finalize_title(content)
+        return ""
+
+    @staticmethod
+    def _replace_fullwidth_blocks(title: str) -> str:
+        """全角块只删除明确脏元数据；无法确认时仅去括号并保留内容。"""
+        def _replace(match: re.Match) -> str:
+            content = next((g for g in match.groups() if g is not None), "").strip()
+            if MediaPipeline._is_rejected_title_block(content):
+                return " "
+            return f" {content} "
+
+        return MediaPipeline._FULLWIDTH_BLOCK_RE.sub(_replace, title or "")
+
+    @staticmethod
+    def _finalize_title(title: str) -> str:
+        t = re.sub(r"\s+", " ", title or "").strip(" .-_·!&")
+        # 只剥明确且位于末尾的中文/英文季标记；绝不把裸尾数当季。
+        t = re.sub(r"\s*第\s*[0-9一二三四五六七八九十]+\s*季\s*$", "", t).strip(" .-_·!&")
+        t = re.sub(r"(?i)\s*Season\s*\d+\s*$", "", t).strip(" .-_·!&")
+        t = re.sub(r"\s+", " ", t).strip(" .-_·!&")
+        return "" if MediaPipeline._is_low_confidence_title(t) else t
 
     @staticmethod
     def _pick_anime_title(title: str) -> str:
@@ -1617,15 +1816,13 @@ class MediaPipeline(_PluginBase):
                 continue
             if re.fullmatch(r"[\d.\-_]+", c):
                 continue
-            if MediaPipeline._ANIME_SKIP_RE.search(c):
-                continue
-            if MediaPipeline._TAG_REJECT.search(c):     # 域名/字幕标签块，不是剧名
+            if MediaPipeline._is_rejected_title_block(c):
                 continue
             c2 = re.split(r"(?i)\s+S\d{1,2}\b|\s*\((?:19|20)\d{2}\)|\s+\d{1,3}-\d{1,3}\b", c)[0]
-            c2 = re.sub(r"\s+", " ", c2).strip(" .-_·!&")
-            if not c2 or len(c2) < 2:
+            c2 = MediaPipeline._finalize_title(c2)
+            if not c2:
                 continue
-            has_cjk = 1 if re.search(r"[\u4e00-\u9fff]", c2) else 0
+            has_cjk = 1 if re.search(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", c2) else 0
             multiword = 1 if (" " in c2 or has_cjk) else 0
             score = (has_cjk, multiword, len(c2))
             if score > best_score:
@@ -1662,23 +1859,20 @@ class MediaPipeline(_PluginBase):
 
     @staticmethod
     def _post_clean_title(t: str) -> str:
+        t = MediaPipeline._replace_fullwidth_blocks(t)
+        # 半角动画方括号仍按候选规则处理；解析库回传到这里时仅移除其技术块。
         t = re.sub(r"\[[^\]]*\]", " ", t)
-        t = re.sub(r"【[^】]*】", " ", t)
-        t = re.sub(r"『[^』]*』", " ", t)
-        t = re.sub(r"「[^」]*」", " ", t)
         t = re.sub(r"\s+", " ", t).strip(" .-_·!&")
         t = re.sub(r"\s+(?:19|20)\d{2}$", "", t).strip()
-        t = re.sub(r"\s*第\s*[0-9一二三四五六七八九十]+\s*季\s*$", "", t).strip()
-        t = re.sub(r"(?i)\s*Season\s*\d+\s*$", "", t).strip()
-        cjk = re.match(r"^([\u4e00-\u9fff0-9：·\s]+?)\s+[A-Za-z]", t)
-        if cjk and re.search(r"[\u4e00-\u9fff]", cjk.group(1)):
-            t = cjk.group(1).strip()
-        return re.sub(r"\s+", " ", t).strip(" .-_·!&")
+        return MediaPipeline._finalize_title(t)
 
     @staticmethod
     def _heuristic_clean_title(title: str) -> str:
-        # 先剥「站点/域名」方括号前缀（[bdys.me] / [ 不太灵…www.butailing.com ] / [哔嘀影视-bde4.com]），
-        # 否则会被当成番剧组名或误选为标题；剥完若不再以 [ 开头就走普通路径（在技术标记处截断取剧名）
+        explicit_title = MediaPipeline._explicit_fullwidth_title(title)
+        if explicit_title:
+            return explicit_title
+        title = MediaPipeline._replace_fullwidth_blocks(title)
+        # 先剥明确站点/域名半角方括号前缀；其余半角方括号继续走动画候选逻辑。
         title = re.sub(
             r"^\s*\[[^\]]*(?:\.(?:com|net|cc|me|tv|org|cn)|影视|公益|发布|下载|资源)[^\]]*\]\s*",
             "", title)
@@ -1686,11 +1880,7 @@ class MediaPipeline(_PluginBase):
             cand = MediaPipeline._pick_anime_title(title)
             if cand:
                 return cand
-        t = title
-        t = re.sub(r"【[^】]*】", " ", t)
-        t = re.sub(r"『[^』]*』", " ", t)
-        t = re.sub(r"「[^」]*」", " ", t)
-        t = re.sub(r"\[[^\]]*\]", " ", t)
+        t = re.sub(r"\[[^\]]*\]", " ", title)
         t = re.sub(r"(?i)\b(?:www\.)?[a-z0-9-]+\.(?:com|net|cc|me|tv|xyz|org|cn)\b", " ", t)
         t = re.sub(r"\s+", " ", t).strip(" .-_·")
         cut = re.split(
@@ -1700,13 +1890,8 @@ class MediaPipeline(_PluginBase):
             r"60fps|10bit)",
             t, maxsplit=1)
         t = cut[0] if cut else t
-        t = t.strip(" .-_·")
-        # 中英混排取中文：仅当「中文前缀 + 纯英文/技术尾巴」时才截断(如 火影忍者Naruto → 火影忍者)；
-        # 若英文后还有中文(如 哆啦A梦、A梦这种夹在中间的拉丁)则保留整名，避免 哆啦A梦→哆啦、地。…→地
-        m = re.match(r"^([\u4e00-\u9fff0-9：·\s]+?)([A-Za-z].*)$", t)
-        if m and re.search(r"[\u4e00-\u9fff]", m.group(1)) and not re.search(r"[\u4e00-\u9fff]", m.group(2)):
-            t = m.group(1).strip()
-        return re.sub(r"\s+", " ", t).strip(" .-_·")
+        # 不再按“中文前缀 + 任意 Latin 尾巴”猜测并截断；混排内容宁可保留给 MP 识别。
+        return MediaPipeline._finalize_title(t)
 
     @staticmethod
     def _safe_name(name: str) -> str:
@@ -1931,21 +2116,65 @@ class MediaPipeline(_PluginBase):
                         ],
                     },
                     # === 步骤3 ===
-                    self._subtitle("步骤3 · 增量整理刮削"),
+                    self._subtitle("步骤3 · 增量整理刮削（兼容单组 / TV→Movie 双组）"),
                     {
                         "component": "VRow",
                         "content": [
-                            self._col(8, "VTextarea", "src_paths",
-                                      "源目录 (MP 容器内路径，多个换行)",
-                                      placeholder="/media/TV\n/media/Movie", rows=2, autoGrow=True),
+                            self._col(4, "VSwitch", "transfer_grouped", "启用 TV/Movie 双组模式"),
                             self._col(4, "VTextField", "recent_days",
                                       "整理增量天数 (0=全量)", placeholder="3"),
                         ],
                     },
                     {
                         "component": "VRow",
+                        "content": [{
+                            "component": "VCol",
+                            "props": {"cols": 12},
+                            "content": [{
+                                "component": "VAlert",
+                                "props": {
+                                    "type": "info", "variant": "tonal", "density": "compact",
+                                    "text": "开启双组后忽略兼容模式的 src_paths / mtype / target_path；"
+                                            "TV 固定按电视剧处理并完整结束后，再把 Movie 固定按电影处理。"
+                                            "任一组源目录留空会跳过该组。",
+                                },
+                            }],
+                        }],
+                    },
+                    {
+                        "component": "VRow",
                         "content": [
-                            self._select(4, "mtype", "媒体类型",
+                            self._col(8, "VTextarea", "transfer_tv_paths",
+                                      "双组 · TV 源目录 (多个换行)",
+                                      placeholder="/media/TV", rows=2, autoGrow=True),
+                            self._col(4, "VTextField", "transfer_tv_target_path",
+                                      "双组 · TV 目标路径 (留空=媒体库默认)",
+                                      placeholder="/media/moviepilot/TV"),
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            self._col(8, "VTextarea", "transfer_movie_paths",
+                                      "双组 · Movie 源目录 (多个换行)",
+                                      placeholder="/media/Movie", rows=2, autoGrow=True),
+                            self._col(4, "VTextField", "transfer_movie_target_path",
+                                      "双组 · Movie 目标路径 (留空=媒体库默认)",
+                                      placeholder="/media/moviepilot/Movie"),
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            self._col(12, "VTextarea", "src_paths",
+                                      "兼容模式 · 源目录 (多个换行)",
+                                      placeholder="/media/TV\n/media/Movie", rows=2, autoGrow=True),
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            self._select(4, "mtype", "兼容模式 · 媒体类型",
                                          [("自动", ""), ("电影", "电影"), ("电视剧", "电视剧")]),
                             self._select(4, "transfer_type", "整理方式",
                                          [("自动(默认)", ""), ("复制", "copy"), ("移动", "move"),
@@ -1962,15 +2191,15 @@ class MediaPipeline(_PluginBase):
                                           ("跟随 MP 设置", "default")]),
                             self._col(4, "VTextField", "min_filesize", "最小文件(MB)", placeholder="0"),
                             self._col(4, "VTextField", "target_path",
-                                      "目标路径 (留空=媒体库默认)", placeholder="/media/moviepilot/TV"),
+                                      "兼容模式 · 目标路径 (留空=媒体库默认)", placeholder="/media/moviepilot/TV"),
                         ],
                     },
                     {
                         "component": "VRow",
                         "content": [
-                            self._select(6, "type_folder", "按类型分类 (电影/电视剧 子目录)",
+                            self._select(6, "type_folder", "类型目录策略",
                                          [("跟随 MP 设置", "default"), ("开启", "on"), ("关闭", "off")]),
-                            self._select(6, "category_folder", "按类别分类 (动画/纪录片 等)",
+                            self._select(6, "category_folder", "类别目录策略",
                                          [("跟随 MP 设置", "default"), ("开启", "on"), ("关闭", "off")]),
                         ],
                     },
@@ -2044,6 +2273,9 @@ class MediaPipeline(_PluginBase):
             "keep_reports": 10, "container": "moviepilot-v2",
             "rl_min": 2.0, "rl_max": 5.0, "rl_batch": 30,
             "rl_pause_min": 60.0, "rl_pause_max": 120.0, "rl_max_ops": 300, "rl_shuffle": True,
+            "transfer_grouped": False,
+            "transfer_tv_paths": "/media/TV", "transfer_tv_target_path": "",
+            "transfer_movie_paths": "/media/Movie", "transfer_movie_target_path": "",
             "src_paths": "", "recent_days": 3, "transfer_unit": "folder",
             "transfer_type": "", "mtype": "", "target_path": "", "scrape": "on",
             "type_folder": "default", "category_folder": "default", "min_filesize": 0,
