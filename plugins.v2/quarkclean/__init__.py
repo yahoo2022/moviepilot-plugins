@@ -9,7 +9,9 @@
      （即 /d/ 之后那段，如 /quark/电视剧/某剧/001.mkv）。
   2. 调 OpenList /api/fs/rename 改【夸克源名】：裸集号 → 剧名.SxxExx（标题取
      相对扫描根的一级目录名）；调 /api/fs/remove 删广告/花絮垃圾；
-     可选清洗一级目录名（去广告前缀 → 剧名 (年份)）。
+     可选清洗一级目录名（去广告前缀 → 剧名 (年份)）；
+     「目录改名映射」可对别名堆叠/裸季号目录做人工精确改名（旧名=新名）。
+     一级目录名结尾的季标记（第7季/Season2/S3）会保留，并用于裸集号文件定季。
   3. 同步把本地 strm 改名 + 重写内容 URL（逐段编码），无需再触发 OpenList 扫描。
 
 为什么改「夸克源名」而不是只改本地 strm：
@@ -66,7 +68,7 @@ class QuarkClean(_PluginBase):
     plugin_name = "夸克改名清洗"
     plugin_desc = "读本地夸克strm→OpenList改夸克源名(裸集号补SxxExx)+清垃圾+目录名清洗，防insert复活，含预演与防风控"
     plugin_icon = "edit.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.1.0"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "quarkclean_"
@@ -121,6 +123,7 @@ class QuarkClean(_PluginBase):
     _rn_no_number_is_junk: bool = True
     _rn_junk_keywords: str = ""
     _rn_junk_subdirs: str = ""              # 附属子目录清单，空=用 _DEFAULT_JUNK_SUBDIRS
+    _rn_dir_map: str = ""                   # 一级目录改名映射：一行一条「旧名=新名」，精确匹配
     _rn_recent_days: int = 0
     _rn_after_date: str = ""
     _rn_template: str = "{title}.S{season:02d}E{episode:02d}{tail}"  # 不含扩展名，末尾补真实后缀
@@ -184,6 +187,7 @@ class QuarkClean(_PluginBase):
             self._rn_junk_subdirs = (config.get("rn_junk_subdirs")
                                      if config.get("rn_junk_subdirs") is not None
                                      else self._DEFAULT_JUNK_SUBDIRS)
+            self._rn_dir_map = config.get("rn_dir_map") or ""
             self._rn_recent_days = int(config.get("rn_recent_days") or 0)
             self._rn_after_date = (config.get("rn_after_date") or "").strip()
             self._rn_template = (config.get("rn_template")
@@ -224,6 +228,7 @@ class QuarkClean(_PluginBase):
             "rn_preserve_tail": self._rn_preserve_tail, "rn_clean_junk": self._rn_clean_junk,
             "rn_no_number_is_junk": self._rn_no_number_is_junk,
             "rn_junk_keywords": self._rn_junk_keywords, "rn_junk_subdirs": self._rn_junk_subdirs,
+            "rn_dir_map": self._rn_dir_map,
             "rn_recent_days": self._rn_recent_days,
             "rn_after_date": self._rn_after_date, "rn_template": self._rn_template,
             "keep_reports": self._keep_reports, "container": self._container,
@@ -523,9 +528,9 @@ class QuarkClean(_PluginBase):
         details: List[Tuple[str, str, str, str]] = []
         reason_count: Dict[str, int] = {}
 
-        # 1) 目录名清洗（去广告前缀 → 剧名(年份)）。电视剧+电影都做——电影没集号，
-        # 目录名是唯一识别源，更需要清洗；先做，避免和文件改名交叉。
-        if self._rn_clean_dirs and not self._aborted_backoff:
+        # 1) 目录名处理：显式映射（旧名=新名）总是生效；广告清洗受「清洗一级目录名」开关。
+        # 电视剧+电影都做——电影没集号，目录名是唯一识别源，更需要清洗；先做，避免和文件改名交叉。
+        if (self._rn_clean_dirs or self._rn_dir_map.strip()) and not self._aborted_backoff:
             for p in (tv_paths + movie_paths):
                 root = Path(p)
                 if root.exists() and root.is_dir():
@@ -595,17 +600,28 @@ class QuarkClean(_PluginBase):
             return
         if self._rl_shuffle:
             random.shuffle(subs)
+        dir_map = self._dir_map_dict()
         for d in subs:
             if self._capped or self._aborted_backoff:
                 return
             old = d.name
-            new = self._clean_dir_name(old)
+            # 显式映射（旧名=新名）优先；未命中才走广告清洗（受「清洗一级目录名」开关控制）
+            mapped = dir_map.get(old)
+            if mapped:
+                new = self._safe_name(mapped).strip()
+                how = "映射"
+            else:
+                if not self._rn_clean_dirs:
+                    continue
+                new = self._clean_dir_name(old)
+                how = "清洗"
             if not new or new == old:
                 continue
             if (root / new).exists():
                 details.append(("SKIP", "dir_conflict", str(d), new))
                 continue
-            if cutoff_ts is not None:
+            # 显式映射是用户的明确指令，不受日期增量过滤；自动清洗仍受过滤保护
+            if not mapped and cutoff_ts is not None:
                 try:
                     if d.stat().st_mtime < cutoff_ts:
                         stat["date_skipped"] += 1
@@ -639,7 +655,7 @@ class QuarkClean(_PluginBase):
 
             if self._rn_dry_run:
                 stat["dirs_renamed"] += 1
-                details.append(("DIR", "would", str(d), f"夸克: {old} -> {new}"))
+                details.append(("DIR", "would", str(d), f"夸克[{how}]: {old} -> {new}"))
                 continue
             if not self._write_gate():
                 details.append(("SKIP", "capped", str(d), "达上限，留待下次"))
@@ -673,7 +689,7 @@ class QuarkClean(_PluginBase):
                     except Exception as e:
                         details.append(("WARN", "child_sync_fail", str(root / new / rel), str(e)))
                 stat["dirs_renamed"] += 1
-                details.append(("DIR", "renamed", str(d), f"-> {new}（子 strm {len(plan)} 个已同步）"))
+                details.append(("DIR", "renamed", str(d), f"-> {new}（{how}，子 strm {len(plan)} 个已同步）"))
             except Exception as e:
                 details.append(("WARN", "dir_local_sync_fail", str(d),
                                 f"夸克已改名但本地同步失败: {e}"))
@@ -832,12 +848,23 @@ class QuarkClean(_PluginBase):
 
     # ---- 目录名清洗规则（保守：去广告块/域名/发布站关键字）----
 
+    # 结尾季号标记（第7季 / Season 2 / S3）：清洗目录名时要原样保留，
+    # 否则「剧名+季」型目录会丢季号信息，裸集号文件将全部错落到默认季。
+    _SEASON_TAIL_RE = re.compile(
+        r"(?i)(?:^|[\s._\-]+)(第\s*[0-9一二三四五六七八九十]+\s*季|Season\s*\d{1,2}|S\d{1,2})\s*$")
+
     def _clean_dir_name(self, name: str) -> str:
-        """把一级目录名规整为「剧名 (年份)」（电影、剧集都留年份）。
+        """把一级目录名规整为「剧名 (年份) [季标记]」（电影、剧集都留年份）。
         先剥发布站中文短语（_clean_title 不认识这些），再用 _clean_title 提取干净标题
         （内部会剥【】/[站点]/域名/发布组/技术标签、中英混排取中文），再补年份。
+        结尾季号标记（第7季等）先摘出来、清洗后原样拼回，避免丢季号。
         提取不到可靠标题、或结果与原名相同 → 返回 "" 表示跳过不改。"""
         pre = name
+        season_suf = ""
+        sm = self._SEASON_TAIL_RE.search(pre)
+        if sm:
+            season_suf = sm.group(1).strip()
+            pre = pre[:sm.start()]
         for kw in ("地址发布页", "收藏不迷路", "最新电影", "电影港",
                    "高清剧集网发布", "高清剧集网", "高清影视之家发布", "高清影视之家",
                    "更多电视剧集下载访问", "更多剧集打包下载访问", "更多电视剧集下载请访问",
@@ -853,6 +880,8 @@ class QuarkClean(_PluginBase):
         res = self._extract_res(name)
         if res:
             new = f"{new} {res}"
+        if season_suf:
+            new = f"{new} {season_suf}"
         new = self._safe_name(new).strip()
         if not new or new == name.strip() or len(new) < 2:
             return ""
@@ -922,6 +951,20 @@ class QuarkClean(_PluginBase):
                 return self._extract_tail(stem[m.end():])
         return ""
 
+    def _season_from_name(self, name: str) -> Optional[int]:
+        """从目录名结尾的季标记（第7季/Season 2/S3）提取季号；没有返回 None。"""
+        m = re.search(
+            r"(?i)(?:^|[\s._\-]+)(?:第\s*([0-9一二三四五六七八九十]+)\s*季|Season\s*(\d{1,2})|S(\d{1,2}))\s*$",
+            name)
+        if not m:
+            return None
+        if m.group(1):
+            g = m.group(1)
+            v = int(g) if g.isdigit() else self._cn_num(g)
+        else:
+            v = int(m.group(2) or m.group(3))
+        return v if 0 < v <= 99 else None
+
     def _top_title_and_season(self, file_path: Path, root: Path) -> Tuple[str, int]:
         try:
             rel_parts = file_path.relative_to(root).parts
@@ -930,7 +973,7 @@ class QuarkClean(_PluginBase):
         if len(rel_parts) < 2:
             return "", self._rn_default_season
         top = rel_parts[0]
-        season = self._rn_default_season
+        season: Optional[int] = None
         for seg in rel_parts[1:-1]:
             sm = re.match(r"(?i)^(?:S|Season\s*)(\d{1,2})$", seg.strip())
             if sm:
@@ -941,6 +984,12 @@ class QuarkClean(_PluginBase):
                 g = cm.group(1)
                 season = int(g) if g.isdigit() else self._cn_num(g)
                 break
+        if season is None:
+            # 中间目录没有季标记 → 再看一级目录名（如「K-卡-D-珊-J-族 第7季」），
+            # 避免裸集号文件全部落进默认季
+            season = self._season_from_name(top)
+        if season is None:
+            season = self._rn_default_season
         return self._clean_title(top), season
 
     @staticmethod
@@ -1040,6 +1089,21 @@ class QuarkClean(_PluginBase):
         raw = self._rn_junk_subdirs.strip() or self._DEFAULT_JUNK_SUBDIRS
         return {p.strip().lower() for p in raw.replace("，", "\n").replace(",", "\n").splitlines()
                 if p.strip()}
+
+    def _dir_map_dict(self) -> Dict[str, str]:
+        """解析一级目录改名映射：一行一条「旧名=新名」，对一级目录名做精确匹配。
+        用于别名堆叠/裸季号这类自动规则不敢动的目录（如 大侦探波洛大侦探波罗.1-13季=大侦探波洛、
+        s1=大侦探波洛S1）。显式映射优先于广告清洗，且不受日期增量过滤。"""
+        mapping: Dict[str, str] = {}
+        for line in (self._rn_dir_map or "").splitlines():
+            line = line.strip()
+            if not line or "=" not in line:
+                continue
+            old, _, new = line.partition("=")
+            old, new = old.strip(), new.strip()
+            if old and new:
+                mapping[old] = new
+        return mapping
 
     def _is_junk(self, file_path: Path) -> bool:
         """分层判垃圾（API 删垃圾为主，铁律保护正片）：
@@ -1382,6 +1446,15 @@ class QuarkClean(_PluginBase):
                     {
                         "component": "VRow",
                         "content": [
+                            self._col(12, "VTextarea", "rn_dir_map",
+                                      "目录改名映射 (一行一条 旧名=新名，精确匹配一级目录；优先于清洗，不受日期过滤)",
+                                      placeholder="大侦探波洛大侦探波罗.1-13季=大侦探波洛",
+                                      rows=2, autoGrow=True),
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
                             self._col(4, "VSwitch", "rn_dry_run", "预演模式 (只出报告，不改夸克)"),
                             self._col(4, "VSwitch", "rn_recursive", "递归子目录"),
                             self._col(4, "VSwitch", "rn_clean_dirs",
@@ -1468,6 +1541,8 @@ class QuarkClean(_PluginBase):
                                             "⚠️ 本地目录名取自 Strm 存储「源paths末段」而非 mount_path："
                                             "夸克存储 mount_path=/QuarkStrm 但 paths=/quark，"
                                             "实际落地 /home/115strm/quark → 容器内 /media/quark。"
+                                            "「目录改名映射」用于别名堆叠/裸季号目录(一行一条 旧名=新名)，"
+                                            "一级目录名结尾的季标记(第7季/Season2/S3)会保留并用于裸集号文件定季。"
                                             "注意：夸克TV(扫码)驱动不支持改名/删除，需用普通夸克 cookie 驱动。",
                                         },
                                     }
@@ -1482,6 +1557,7 @@ class QuarkClean(_PluginBase):
             "run_once": False, "cron": "", "step_timeout_min": 0,
             "openlist_url": "", "openlist_token": "",
             "rn_tv_paths": "/media/quark", "rn_movie_paths": "",
+            "rn_dir_map": "",
             "rn_recursive": True, "rn_dry_run": True, "rn_clean_dirs": False,
             "rn_default_season": 1, "rn_max_episode": 500, "rn_preserve_tail": True,
             "rn_clean_junk": True, "rn_no_number_is_junk": True, "rn_junk_keywords": "",
