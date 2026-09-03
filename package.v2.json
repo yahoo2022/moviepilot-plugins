@@ -87,11 +87,12 @@
     "name": "夸克改名清洗",
     "description": "给夸克网盘链路补上与115相同的改名清洗：读本地夸克strm解析源路径→OpenList改夸克源名(裸集号补SxxExx)+清垃圾+目录名清洗，本地strm同步，含预演与拟人化防风控",
     "labels": "整理",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "icon": "edit.png",
     "author": "yahoo2022",
     "level": 1,
     "history": {
+      "v1.0.1": "修正默认目录：Strm 驱动落盘目录名实际取自「源 paths 的末段」而非 mount_path——夸克存储 mount_path=/QuarkStrm 但 paths=/quark，本地真实路径是 /home/115strm/quark（容器内 /media/quark）。默认路径改为 /media/quark，并对已保存的旧默认 /media/QuarkStrm 做自动迁移纠正（115 各存储只是恰好 mount_path 与 paths 末段同名才一直没暴露此规则）",
       "v1.0.0": "初始版本：从 mediapipeline 步骤2 独立出来，只作用于夸克的 strm 目录，与 115 主流程互不干扰。读本地 strm 解析夸克源路径→调 OpenList /api/fs/rename 改夸克源名(裸集号→剧名.SxxExx，标题取一级目录名)+/api/fs/remove 清广告花絮垃圾+可选清洗一级目录名(剧名(年份))；改完本地 strm 同步改名+重建URL免再扫描；预演模式+明细报告+拟人化限速(随机间隔/批次长停/单次上限/失败退避)+幽灵(源不存在)中性处理。注意夸克TV扫码驱动不支持改名，需普通夸克cookie驱动"
     }
   },

@@ -17,7 +17,10 @@
   源名复活，导致每集堆两份。改夸克源名后源头就干净，strm 天生规范、不复活。
 
 注意：
-  - 目录填 MP 容器内路径（如 /media/QuarkStrm）；本插件运行在 moviepilot-v2 容器内。
+  - 目录填 MP 容器内路径（如 /media/quark）；本插件运行在 moviepilot-v2 容器内。
+    ⚠️ 本地目录名取自 Strm 存储「源 paths 的末段」，不是 mount_path：
+    夸克存储 mount_path=/QuarkStrm 但 paths=/quark，所以本地目录是 /home/115strm/quark
+    → 容器内 /media/quark（115 各存储只是恰好两者同名才没暴露这个规则）。
   - OpenList Token 需要管理员令牌（/api/fs/rename、/api/fs/remove 是管理接口）。
   - 夸克网盘若用「夸克TV」驱动（扫码登录的那种）不支持改名/删除，本插件写操作会
     全部失败；必须用普通「夸克网盘 (Quark)」cookie 驱动。
@@ -63,7 +66,7 @@ class QuarkClean(_PluginBase):
     plugin_name = "夸克改名清洗"
     plugin_desc = "读本地夸克strm→OpenList改夸克源名(裸集号补SxxExx)+清垃圾+目录名清洗，防insert复活，含预演与防风控"
     plugin_icon = "edit.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "quarkclean_"
@@ -106,7 +109,7 @@ class QuarkClean(_PluginBase):
     _openlist_token: str = ""
 
     # ---- 改名清洗 ----
-    _rn_tv_paths: str = "/media/QuarkStrm"  # 电视剧 strm 目录（改名+清垃圾）；混放内容也填这里
+    _rn_tv_paths: str = "/media/quark"      # 电视剧 strm 目录（改名+清垃圾）；混放内容也填这里
     _rn_movie_paths: str = ""               # 电影 strm 目录（只清垃圾）；可留空
     _rn_recursive: bool = True
     _rn_dry_run: bool = True
@@ -159,9 +162,16 @@ class QuarkClean(_PluginBase):
             self._openlist_token = config.get("openlist_token", "")
 
             self._rn_tv_paths = (config.get("rn_tv_paths")
-                                 if config.get("rn_tv_paths") is not None else "/media/QuarkStrm")
+                                 if config.get("rn_tv_paths") is not None else "/media/quark")
+            # v1.0.1 迁移：早期默认填的 /media/QuarkStrm 是错的。Strm 驱动落盘目录名取自
+            # 「源 paths 的末段」而非 mount_path——夸克存储 paths=/quark，实际落地在
+            # /home/115strm/quark（容器内 /media/quark）。自动把已保存的旧默认纠正过来。
+            if self._rn_tv_paths:
+                self._rn_tv_paths = self._rn_tv_paths.replace("/media/QuarkStrm", "/media/quark")
             self._rn_movie_paths = (config.get("rn_movie_paths")
                                     if config.get("rn_movie_paths") is not None else "")
+            if self._rn_movie_paths:
+                self._rn_movie_paths = self._rn_movie_paths.replace("/media/QuarkStrm", "/media/quark")
             self._rn_recursive = config.get("rn_recursive", True)
             self._rn_dry_run = config.get("rn_dry_run", True)
             self._rn_clean_dirs = config.get("rn_clean_dirs", False)
@@ -1363,7 +1373,7 @@ class QuarkClean(_PluginBase):
                         "content": [
                             self._col(6, "VTextarea", "rn_tv_paths",
                                       "电视剧 strm 目录 (含集号→按一级目录名改 SxxExx；多个换行)",
-                                      placeholder="/media/QuarkStrm", rows=2, autoGrow=True),
+                                      placeholder="/media/quark", rows=2, autoGrow=True),
                             self._col(6, "VTextarea", "rn_movie_paths",
                                       "电影 strm 目录 (只清垃圾，不改名；可留空)",
                                       placeholder="", rows=2, autoGrow=True),
@@ -1454,7 +1464,10 @@ class QuarkClean(_PluginBase):
                                             "单次上限+失败退避)防风控，预演模式不触发写操作。"
                                             "强烈建议：先只开预演跑一遍，docker cp 下载报告核对，"
                                             "确认无误再关预演小批量实跑。"
-                                            "目录填 MP 容器内路径(如 /media/QuarkStrm)。"
+                                            "目录填 MP 容器内路径(如 /media/quark)。"
+                                            "⚠️ 本地目录名取自 Strm 存储「源paths末段」而非 mount_path："
+                                            "夸克存储 mount_path=/QuarkStrm 但 paths=/quark，"
+                                            "实际落地 /home/115strm/quark → 容器内 /media/quark。"
                                             "注意：夸克TV(扫码)驱动不支持改名/删除，需用普通夸克 cookie 驱动。",
                                         },
                                     }
@@ -1468,7 +1481,7 @@ class QuarkClean(_PluginBase):
             "enabled": False, "notify": True, "notify_type": "Plugin",
             "run_once": False, "cron": "", "step_timeout_min": 0,
             "openlist_url": "", "openlist_token": "",
-            "rn_tv_paths": "/media/QuarkStrm", "rn_movie_paths": "",
+            "rn_tv_paths": "/media/quark", "rn_movie_paths": "",
             "rn_recursive": True, "rn_dry_run": True, "rn_clean_dirs": False,
             "rn_default_season": 1, "rn_max_episode": 500, "rn_preserve_tail": True,
             "rn_clean_junk": True, "rn_no_number_is_junk": True, "rn_junk_keywords": "",

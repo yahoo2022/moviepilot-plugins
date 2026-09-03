@@ -2,7 +2,7 @@
   "id": "QuarkClean",
   "name": "夸克改名清洗",
   "description": "读本地夸克strm→OpenList改夸克源名(裸集号补SxxExx)+清垃圾+目录名清洗，防insert复活，含预演与防风控",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "yahoo2022",
   "author_url": "https://github.com/yahoo2022",
   "icon": "edit.png",
