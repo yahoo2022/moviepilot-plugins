@@ -68,7 +68,7 @@ class QuarkClean(_PluginBase):
     plugin_name = "夸克改名清洗"
     plugin_desc = "读本地夸克strm→OpenList改夸克源名(裸集号补SxxExx)+清垃圾+目录名清洗，防insert复活，含预演与防风控"
     plugin_icon = "edit.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "quarkclean_"
@@ -1091,11 +1091,11 @@ class QuarkClean(_PluginBase):
                 if p.strip()}
 
     def _dir_map_dict(self) -> Dict[str, str]:
-        """解析一级目录改名映射：一行一条「旧名=新名」，对一级目录名做精确匹配。
+        """解析一级目录改名映射：一行一条「旧名=新名」（全角＝也认），对一级目录名做精确匹配。
         用于别名堆叠/裸季号这类自动规则不敢动的目录（如 大侦探波洛大侦探波罗.1-13季=大侦探波洛、
         s1=大侦探波洛S1）。显式映射优先于广告清洗，且不受日期增量过滤。"""
         mapping: Dict[str, str] = {}
-        for line in (self._rn_dir_map or "").splitlines():
+        for line in (self._rn_dir_map or "").replace("＝", "=").splitlines():
             line = line.strip()
             if not line or "=" not in line:
                 continue
@@ -1355,10 +1355,12 @@ class QuarkClean(_PluginBase):
             data_dir = self.get_data_path()
             ts = datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y%m%d_%H%M%S")
             report = Path(data_dir) / f"quarkclean_report_{ts}.txt"
+            n_map = len(self._dir_map_dict())
             lines = [
                 f"# 夸克改名清洗报告 ({mode})",
                 f"# 时间: {ts}",
                 f"# 电视剧目录: {self._rn_tv_paths} | 电影目录: {self._rn_movie_paths}",
+                f"# 目录映射: {n_map} 条" + ("" if n_map else "（未配置，需在配置里填 旧名=新名）"),
                 f"# {summary.splitlines()[0]}",
                 "",
                 "动作\t原因\t本地strm路径\t目标/说明",
