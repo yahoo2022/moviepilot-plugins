@@ -68,7 +68,7 @@ class QuarkClean(_PluginBase):
     plugin_name = "夸克改名清洗"
     plugin_desc = "读本地夸克strm→OpenList改夸克源名(裸集号补SxxExx)+清垃圾+目录名清洗，防insert复活，含预演与防风控"
     plugin_icon = "edit.png"
-    plugin_version = "1.1.1"
+    plugin_version = "1.2.0"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "quarkclean_"
@@ -124,6 +124,7 @@ class QuarkClean(_PluginBase):
     _rn_junk_keywords: str = ""
     _rn_junk_subdirs: str = ""              # 附属子目录清单，空=用 _DEFAULT_JUNK_SUBDIRS
     _rn_dir_map: str = ""                   # 一级目录改名映射：一行一条「旧名=新名」，精确匹配
+    _rn_extras_dirs: str = "短片"           # 附属内容目录（短片等）：直接跳过不改名，防裸编号误当正片集号
     _rn_recent_days: int = 0
     _rn_after_date: str = ""
     _rn_template: str = "{title}.S{season:02d}E{episode:02d}{tail}"  # 不含扩展名，末尾补真实后缀
@@ -188,6 +189,8 @@ class QuarkClean(_PluginBase):
                                      if config.get("rn_junk_subdirs") is not None
                                      else self._DEFAULT_JUNK_SUBDIRS)
             self._rn_dir_map = config.get("rn_dir_map") or ""
+            self._rn_extras_dirs = (config.get("rn_extras_dirs")
+                                    if config.get("rn_extras_dirs") is not None else "短片")
             self._rn_recent_days = int(config.get("rn_recent_days") or 0)
             self._rn_after_date = (config.get("rn_after_date") or "").strip()
             self._rn_template = (config.get("rn_template")
@@ -229,6 +232,7 @@ class QuarkClean(_PluginBase):
             "rn_no_number_is_junk": self._rn_no_number_is_junk,
             "rn_junk_keywords": self._rn_junk_keywords, "rn_junk_subdirs": self._rn_junk_subdirs,
             "rn_dir_map": self._rn_dir_map,
+            "rn_extras_dirs": self._rn_extras_dirs,
             "rn_recent_days": self._rn_recent_days,
             "rn_after_date": self._rn_after_date, "rn_template": self._rn_template,
             "keep_reports": self._keep_reports, "container": self._container,
@@ -527,6 +531,8 @@ class QuarkClean(_PluginBase):
                 "ghost": 0}
         details: List[Tuple[str, str, str, str]] = []
         reason_count: Dict[str, int] = {}
+        # 本轮已规划的目标 strm 名（绝对路径），用于在预演/实跑中检出「多个源改到同名」
+        planned: set = set()
 
         # 1) 目录名处理：显式映射（旧名=新名）总是生效；广告清洗受「清洗一级目录名」开关。
         # 电视剧+电影都做——电影没集号，目录名是唯一识别源，更需要清洗；先做，避免和文件改名交叉。
@@ -549,7 +555,7 @@ class QuarkClean(_PluginBase):
                     details.append(("ERROR", "bad_root", str(root), "目录不存在或不是目录"))
                     stat["failed"] += 1
                     continue
-                self._scan_dir_rename(root, kind, cutoff_ts, stat, details, reason_count)
+                self._scan_dir_rename(root, kind, cutoff_ts, stat, details, reason_count, planned)
                 if self._capped or self._aborted_backoff:
                     stop = True
                     break
@@ -696,7 +702,7 @@ class QuarkClean(_PluginBase):
                 stat["dirs_renamed"] += 1
 
     def _scan_dir_rename(self, root: Path, kind: str, cutoff_ts: Optional[float],
-                         stat: dict, details: list, reason_count: dict):
+                         stat: dict, details: list, reason_count: dict, planned: set):
         files = list(root.rglob("*.strm") if self._rn_recursive else root.glob("*.strm"))
         if self._rl_shuffle:
             random.shuffle(files)
@@ -723,19 +729,28 @@ class QuarkClean(_PluginBase):
                     stat["skipped"] += 1
                     reason_count["movie_keep"] = reason_count.get("movie_keep", 0) + 1
                     continue
-                self._handle_rename(strm, content, src, root, stat, details, reason_count)
+                self._handle_rename(strm, content, src, root, stat, details, reason_count, planned)
             except Exception as e:
                 stat["failed"] += 1
                 details.append(("ERROR", "exception", str(strm), str(e)))
                 logger.error(f"[{self.plugin_name}] 处理失败 {strm}: {e}")
 
     def _handle_rename(self, strm: Path, content: str, src: Optional[str],
-                       root: Path, stat: dict, details: list, reason_count: dict):
+                       root: Path, stat: dict, details: list, reason_count: dict,
+                       planned: set):
         # 合集包（[共N部合集]，一个文件夹塞多部）：自动拆错误率高，跳过交人工
         if "部合集" in str(strm):
             stat["skipped"] += 1
             reason_count["collection_manual"] = reason_count.get("collection_manual", 0) + 1
             details.append(("SKIP", "collection", str(strm), "合集包，交人工"))
+            return
+        # 附属内容目录（短片等）：裸编号是条目序号不是剧集集号，跳过防误标+撞车
+        extras_dirs = self._extras_dir_set()
+        if extras_dirs and strm.parent.name.strip().lower() in extras_dirs:
+            stat["skipped"] += 1
+            reason_count["extras_dir"] = reason_count.get("extras_dir", 0) + 1
+            details.append(("SKIP", "extras_dir", str(strm),
+                            f"附属目录「{strm.parent.name}」，不改名"))
             return
         stem = strm.stem
         parsed = self._parse_any_episode(stem)
@@ -772,8 +787,18 @@ class QuarkClean(_PluginBase):
             stat["conflicts"] += 1
             details.append(("SKIP", "conflict", str(strm), new_strm_name))
             return
+        # 本轮内多个源改到同一目标名（如 S02E01-1 与 S02E01-2 都落到 S02E01）→
+        # 第一个放行，后续判冲突跳过，避免网盘端改名互踩/本地 strm 重名
+        tkey = str(target_strm)
+        if tkey in planned:
+            stat["conflicts"] += 1
+            reason_count["dup_target"] = reason_count.get("dup_target", 0) + 1
+            details.append(("SKIP", "dup_target", str(strm),
+                            f"与本轮另一文件同名: {new_strm_name}"))
+            return
 
         if self._rn_dry_run:
+            planned.add(tkey)
             old_src = src.rstrip("/").split("/")[-1] if src else "?"
             stat["renamed"] += 1
             details.append(("RENAME", "would", str(strm), f"夸克: {old_src} -> {new_media}"))
@@ -797,6 +822,7 @@ class QuarkClean(_PluginBase):
             stat["failed"] += 1
             details.append(("ERROR", "ol_rename_fail", str(strm), err))
             return
+        planned.add(tkey)
         # 本地同步：改 strm 内容 URL(指向新文件名) + 改本地 strm 文件名
         try:
             new_src = src.rsplit("/", 1)[0] + "/" + new_media
@@ -975,11 +1001,14 @@ class QuarkClean(_PluginBase):
         top = rel_parts[0]
         season: Optional[int] = None
         for seg in rel_parts[1:-1]:
-            sm = re.match(r"(?i)^(?:S|Season\s*)(\d{1,2})$", seg.strip())
+            # 整个目录就是季标记（S01/Season 2/第二季），或季标记开头后接剧名
+            # （如「S02 还是不能结婚的男人2019【全10集】」）
+            sm = re.match(r"(?i)^(?:S|Season\s*)(\d{1,2})(?=$|[\s._\-【】\[])", seg.strip())
             if sm:
                 season = int(sm.group(1))
                 break
-            cm = re.match(r"^第\s*([0-9一二三四五六七八九十]+)\s*季$", seg.strip())
+            cm = re.match(r"^第\s*([0-9一二三四五六七八九十]+)\s*季(?=$|[\s._\-【】\[])",
+                          seg.strip())
             if cm:
                 g = cm.group(1)
                 season = int(g) if g.isdigit() else self._cn_num(g)
@@ -1104,6 +1133,13 @@ class QuarkClean(_PluginBase):
             if old and new:
                 mapping[old] = new
         return mapping
+
+    def _extras_dir_set(self) -> set:
+        """附属内容目录清单（短片等）：位于这些目录里的裸编号文件不是正片剧集，
+        跳过改名，避免误标 SxxExx 与真剧集撞车。"""
+        raw = (self._rn_extras_dirs or "").strip()
+        return {p.strip().lower() for p in raw.replace("，", "\n").replace(",", "\n").splitlines()
+                if p.strip()}
 
     def _is_junk(self, file_path: Path) -> bool:
         """分层判垃圾（API 删垃圾为主，铁律保护正片）：
@@ -1501,6 +1537,14 @@ class QuarkClean(_PluginBase):
                                       rows=2, autoGrow=True),
                         ],
                     },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            self._col(12, "VTextField", "rn_extras_dirs",
+                                      "附属内容目录 (这些目录里的裸编号文件跳过不改名，防误当正片集号；逗号分隔)",
+                                      placeholder="短片"),
+                        ],
+                    },
                     self._subtitle("防风控节奏（只作用于 rename/remove 写操作；预演不触发）"),
                     {
                         "component": "VRow",
@@ -1560,6 +1604,7 @@ class QuarkClean(_PluginBase):
             "openlist_url": "", "openlist_token": "",
             "rn_tv_paths": "/media/quark", "rn_movie_paths": "",
             "rn_dir_map": "",
+            "rn_extras_dirs": "短片",
             "rn_recursive": True, "rn_dry_run": True, "rn_clean_dirs": False,
             "rn_default_season": 1, "rn_max_episode": 500, "rn_preserve_tail": True,
             "rn_clean_junk": True, "rn_no_number_is_junk": True, "rn_junk_keywords": "",
