@@ -124,13 +124,14 @@
   },
   "SourcePipeline": {
     "name": "115 源流水线",
-    "description": "来源实例与处理逻辑分离，按请求预算广度优先读取 115 原生目录并持久化 SQLite；阶段1严格只读",
+    "description": "只读读取 115 原生目录建 SQLite 缓存，并在缓存上产出垃圾清单与改名预演报告；代码级无任何写入能力",
     "labels": "工具",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "icon": "workflow.png",
     "author": "yahoo2022",
     "level": 1,
     "history": {
+      "v0.3.0": "新增 A 层整理规划（纯本地、0 次网络请求）：在库存缓存上跑垃圾判定与 JAV/FC2 番号改名规则，产出 JSONL/TSV/summary 三件套报告和状态聚合。垃圾判定支持 off/黑名单/白名单三种模式、可配置保留后缀、垃圾后缀、整段广告关键词、附属子目录、小视频阈值；正片铁律（视频且体积达阈值、或已解析出可靠番号）优先于一切规则，目录永不进删除清单。改名只作用于 logic=jav/fc2 的视频文件，分段/未知后缀、多 canonical、同目录目标冲突一律标 REVIEW_REQUIRED 或 CONFLICT。新增 plan_once 开关、规划 Cron、/source_pipeline_plan 命令、POST /plan 与 GET /plans。改名与删除的执行改由独立服务承担，写客户端与不可变清单代码移出插件目录到仓库 hub-seed/，插件仍只有 POST /api/fs/list 一个网络 endpoint",
       "v0.2.0": "来源实例与处理逻辑解耦：页面推荐 name|logic|/absolute/path，兼容旧两列；支持 leak 等独立来源复用 jav logic，并持久化到 SQLite schema v2。扫描改为请求预算驱动的逐目录广度优先队列，新增根/普通目录刷新 TTL、层级进度、停止原因和 v1 数据库无损迁移",
       "v0.1.1": "隐私与读取风控加固：移除公开源码中的私网 IP 和个人目录默认值，原生源改为页面通用 profile_name|/absolute/path 多行配置；读取改为默认每次随机等待 1.5~3 秒、每 20 请求长停 30~90 秒，并保留每 profile 单轮 60 请求硬预算",
       "v0.1.0": "阶段1只读库存缓存：以页面配置的 /115 原生目录为事实源，仅调用 POST /api/fs/list；支持 cache/live 分离、严格分页、attempt 限速与预算、SQLite WAL generation、根目录优先持久队列和多轮收敛。Cron/命令/API 固定 refresh=false，live 仅配置页确认短语触发；partial 不推导缺失，live 缺失只累计观察，不 tombstone、不改名、不删除、不生成 STRM"
