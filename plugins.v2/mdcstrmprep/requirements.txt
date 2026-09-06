@@ -1,0 +1,1 @@
+# 仅使用 Python 标准库和 MoviePilot 运行环境自带依赖，无额外依赖。

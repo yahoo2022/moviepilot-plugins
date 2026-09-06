@@ -1,0 +1,10 @@
+{
+  "id": "MdcStrmPrep",
+  "name": "MDC STRM 预处理",
+  "description": "日本厂商/FC2 番号规范化、冲突审计与强制预演报告；只读源，不写 inbox",
+  "version": "0.1.0",
+  "author": "yahoo2022",
+  "author_url": "https://github.com/yahoo2022",
+  "icon": "edit.png",
+  "level": 1
+}

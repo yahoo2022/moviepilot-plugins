@@ -135,5 +135,17 @@
       "v0.1.1": "隐私与读取风控加固：移除公开源码中的私网 IP 和个人目录默认值，原生源改为页面通用 profile_name|/absolute/path 多行配置；读取改为默认每次随机等待 1.5~3 秒、每 20 请求长停 30~90 秒，并保留每 profile 单轮 60 请求硬预算",
       "v0.1.0": "阶段1只读库存缓存：以页面配置的 /115 原生目录为事实源，仅调用 POST /api/fs/list；支持 cache/live 分离、严格分页、attempt 限速与预算、SQLite WAL generation、根目录优先持久队列和多轮收敛。Cron/命令/API 固定 refresh=false，live 仅配置页确认短语触发；partial 不推导缺失，live 缺失只累计观察，不 tombstone、不改名、不删除、不生成 STRM"
     }
+  },
+  "MdcStrmPrep": {
+    "name": "MDC STRM 预处理",
+    "description": "日本厂商/FC2 番号规范化、冲突审计与强制预演报告；只读源，不写 inbox",
+    "labels": "工具",
+    "version": "0.1.0",
+    "icon": "edit.png",
+    "author": "yahoo2022",
+    "level": 1,
+    "history": {
+      "v0.1.0": "首个强制预演版：日本厂商/FC2 独立 profile，只读递归扫描本地 STRM，按本地名/URL叶子/父目录取证；FC2 固定规范为 FC2-<digits>，JAV 使用可配置前缀 allowlist 并保留 HEY 三段；multipart、profile mismatch、同番号异内容进入审核/冲突，同番号同 SHA-256 才判重复；输出原子 JSONL/TSV/摘要报告，支持状态、Cron、命令、POST API 和 MP/钉钉通知。代码级禁止写源目录和 inbox"
+    }
   }
 }
