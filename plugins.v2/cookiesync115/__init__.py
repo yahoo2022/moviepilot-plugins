@@ -832,7 +832,7 @@ class CookieSync115(_PluginBase):
                     # OpenList
                     {"component": "VRow", "content": [
                         self._col(6, "VTextField", "openlist_url", "OpenList 地址",
-                                  placeholder="http://192.168.1.111:5244"),
+                                  placeholder="http://openlist:5244"),
                         self._col(6, "VTextField", "openlist_token", "OpenList 管理员 Token",
                                   placeholder="openlist-xxxxxx（需管理员令牌）"),
                     ]},

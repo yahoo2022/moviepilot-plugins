@@ -1071,14 +1071,14 @@ class MediaPipeline(_PluginBase):
 
     @staticmethod
     def _head_d(content: str) -> str:
-        """取 strm URL 里到 /d 为止的前缀，如 http://192.168.1.111:5244/d。"""
+        """取 strm URL 里到 /d 为止的前缀，如 http://openlist:5244/d。"""
         c = content.split("?", 1)[0]
         i = c.find("/d/")
         return (c[:i] + "/d") if i >= 0 else ""
 
     @staticmethod
     def _strm_source_path(content: str) -> Optional[str]:
-        """从 strm 内容(URL)解析 115 源路径(URL 解码后)，如 /115/自动追踪影视/.../x.mkv。"""
+        """从 strm 内容(URL)解析 115 源路径(URL 解码后)，如 /115/path/to/media/x.mkv。"""
         if not content:
             return None
         c = content.split("?", 1)[0].strip()
@@ -2010,7 +2010,7 @@ class MediaPipeline(_PluginBase):
                         "component": "VRow",
                         "content": [
                             self._col(6, "VTextField", "openlist_url",
-                                      "OpenList 地址", placeholder="http://192.168.1.111:5244"),
+                                      "OpenList 地址", placeholder="http://openlist:5244"),
                             self._col(6, "VTextField", "openlist_token",
                                       "OpenList Token", placeholder="openlist-xxxxxx"),
                         ],
@@ -2219,7 +2219,7 @@ class MediaPipeline(_PluginBase):
                         "component": "VRow",
                         "content": [
                             self._col(6, "VTextField", "emby_host",
-                                      "Emby 地址", placeholder="http://192.168.1.126:8096"),
+                                      "Emby 地址", placeholder="http://emby:8096"),
                             self._col(6, "VTextField", "emby_apikey",
                                       "Emby API Key", placeholder="Emby 后台生成的 API Key"),
                         ],

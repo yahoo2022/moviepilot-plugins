@@ -75,7 +75,7 @@ class IncrPipeline(_PluginBase):
     _do_emby: bool = False      # 第三步：触发 Emby 媒体库扫描（全量）
 
     # ---- 第三步：Emby 媒体库扫描参数 ----
-    _emby_host: str = ""        # 如 http://192.168.1.126:8096
+    _emby_host: str = ""        # 如 http://emby:8096
     _emby_apikey: str = ""
 
     # ---- 第一步：OpenList 扫描参数 ----
@@ -821,7 +821,7 @@ class IncrPipeline(_PluginBase):
                         "content": [
                             self._col(6, "VTextField", "openlist_url",
                                       "OpenList 地址",
-                                      placeholder="http://192.168.1.111:5244"),
+                                      placeholder="http://openlist:5244"),
                             self._col(6, "VTextField", "openlist_token",
                                       "OpenList Token", placeholder="openlist-xxxxxx"),
                         ],
@@ -913,7 +913,7 @@ class IncrPipeline(_PluginBase):
                         "content": [
                             self._col(6, "VTextField", "emby_host",
                                       "Emby 地址",
-                                      placeholder="http://192.168.1.126:8096"),
+                                      placeholder="http://emby:8096"),
                             self._col(6, "VTextField", "emby_apikey",
                                       "Emby API Key",
                                       placeholder="Emby 后台生成的 API Key"),
