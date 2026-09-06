@@ -1,0 +1,10 @@
+{
+  "id": "SourcePipeline",
+  "name": "115 源流水线",
+  "description": "来源实例与处理逻辑分离，按请求预算广度优先读取 115 原生目录并持久化 SQLite；阶段1严格只读",
+  "version": "0.2.0",
+  "author": "yahoo2022",
+  "author_url": "https://github.com/yahoo2022",
+  "icon": "workflow.png",
+  "level": 1
+}
