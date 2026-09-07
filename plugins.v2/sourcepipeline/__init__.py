@@ -15,6 +15,7 @@ v0.3.0 提供两件事，全部只读：
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -62,7 +63,7 @@ class SourcePipeline(_PluginBase):
     plugin_name = "115 源流水线"
     plugin_desc = "只读读取 115 原生目录建 SQLite 缓存，并在缓存上产出垃圾清单与改名预演报告（无任何写入）"
     plugin_icon = "workflow.png"
-    plugin_version = "0.3.0"
+    plugin_version = "0.3.1"
     plugin_author = "yahoo2022"
     author_url = "https://github.com/yahoo2022"
     plugin_config_prefix = "sourcepipeline_"
@@ -339,12 +340,19 @@ class SourcePipeline(_PluginBase):
             known_suffixes=parse_known_suffixes(self._known_suffixes),
             enable_rename=self._enable_rename,
             enable_garbage=self._enable_garbage,
+            log=self._log,
         )
+
+    def _log(self, message: str) -> None:
+        """核心模块的日志出口。它们不 import MP logger，由这里注入。"""
+
+        logger.info(f"[{self.plugin_name}] {message}")
 
     def _client_factory(self, profile: ProfileConfig) -> ReadOnlyOpenListClient:
         return ReadOnlyOpenListClient(
             self._openlist_url,
             self._openlist_token,
+            log=lambda message: self._log(f"[{profile.name}] {message}"),
             timeout_seconds=self._timeout_seconds,
             retries=self._retries,
             min_interval_seconds=self._min_interval_seconds,
@@ -361,14 +369,22 @@ class SourcePipeline(_PluginBase):
         if not self._run_lock.acquire(blocking=False):
             logger.warning(f"[{self.plugin_name}] 已有库存任务运行，本次 {mode} 跳过")
             return
+        started = time.monotonic()
         try:
             self._set_status(state="running", mode=mode, message="库存扫描运行中")
+            profiles = self._profiles()
+            self._log(
+                f"▶ 开始 {mode} 同步：{len(profiles)} 个 profile"
+                f"（{', '.join(item.name for item in profiles)}），"
+                f"每 profile 预算 {self._max_requests_per_profile} 请求"
+            )
             service = InventoryService(
                 self._database(),
-                self._profiles(),
+                profiles,
                 self._client_factory,
                 root_refresh_hours=self._root_refresh_hours,
                 directory_refresh_hours=self._directory_refresh_hours,
+                log=self._log,
             )
             result = service.run(mode, confirmation=confirmation)
             data = result.to_dict()
@@ -386,7 +402,10 @@ class SourcePipeline(_PluginBase):
                 last_run=data,
                 database=self._database().status(),
             )
-            logger.info(f"[{self.plugin_name}] {mode} 完成: {self._aggregate_text(data)}")
+            self._log(
+                f"■ {mode} 同步结束（耗时 {int(time.monotonic() - started)} 秒）："
+                f"{message}。{self._aggregate_text(data)}"
+            )
             if self._notify:
                 self.post_message(
                     mtype=NotificationType.Plugin,
@@ -395,7 +414,10 @@ class SourcePipeline(_PluginBase):
                 )
         except Exception as error:
             message = str(error)[:500]
-            logger.error(f"[{self.plugin_name}] {mode} 失败: {message}")
+            logger.error(
+                f"[{self.plugin_name}] ■ {mode} 同步失败"
+                f"（耗时 {int(time.monotonic() - started)} 秒）: {message}"
+            )
             self._set_status(state="failed", mode=mode, message=message)
         finally:
             self._run_lock.release()
@@ -410,10 +432,15 @@ class SourcePipeline(_PluginBase):
         if not self._run_lock.acquire(blocking=False):
             logger.warning(f"[{self.plugin_name}] 已有任务运行，本次 plan 跳过")
             return
+        started = time.monotonic()
         try:
             self._set_status(state="running", mode="plan", message="整理规划运行中")
             profiles = self._profiles()
             service = self._planning_service(profiles)
+            self._log(
+                f"▶ 开始整理规划（本地，0 次网络请求）：{len(profiles)} 个 profile。"
+                f"{describe(service.rules)}"
+            )
             result = service.run()
             database = self._database()
             aggregate = database.plan_status()
@@ -444,7 +471,11 @@ class SourcePipeline(_PluginBase):
                 plans=aggregate,
             )
             text = self._plan_text(data, aggregate, str(report))
-            logger.info(f"[{self.plugin_name}] plan 完成: {text.splitlines()[0]}")
+            self._log(
+                f"■ 整理规划结束（耗时 {int(time.monotonic() - started)} 秒）："
+                f"{text.splitlines()[0]}"
+            )
+            self._log(f"■ 报告（{len(records)} 条）：{report}")
             if self._notify:
                 self.post_message(
                     mtype=NotificationType.Plugin,
@@ -453,7 +484,10 @@ class SourcePipeline(_PluginBase):
                 )
         except Exception as error:
             message = str(error)[:500]
-            logger.error(f"[{self.plugin_name}] plan 失败: {message}")
+            logger.error(
+                f"[{self.plugin_name}] ■ 整理规划失败"
+                f"（耗时 {int(time.monotonic() - started)} 秒）: {message}"
+            )
             self._set_status(state="failed", mode="plan", message=message)
         finally:
             self._run_lock.release()

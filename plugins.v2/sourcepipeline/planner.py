@@ -85,6 +85,7 @@ class PlanningService:
         enable_rename: bool = True,
         enable_garbage: bool = True,
         clock: Callable[[], str] = utc_now,
+        log: Optional[Callable[[str], None]] = None,
     ):
         self.database = database
         self.profiles = [profile for profile in profiles if profile.enabled]
@@ -95,6 +96,8 @@ class PlanningService:
             _normalized_suffix(value) for value in known_suffixes if str(value).strip()
         )
         self.clock = clock
+        # 日志用注入回调而不是直接 import MoviePilot logger：本模块要保持可脱离 MP 迁移。
+        self.log = log if log is not None else (lambda _message: None)
         self._engines: dict[str, Profile] = {
             "jav": JavProfile(list(jav_prefixes) if jav_prefixes else None),
             "fc2": Fc2Profile(),
@@ -130,10 +133,19 @@ class PlanningService:
         )
         for profile in self.profiles:
             try:
-                summary.profiles.append(self._run_profile(profile))
+                self.log(f"── profile {profile.name}({profile.logic}) 规划中：{profile.root}")
+                result = self._run_profile(profile)
+                summary.profiles.append(result)
+                self.log(
+                    f"── profile {profile.name} 完成："
+                    f"计划 {result['planned']}，"
+                    f"改名 {result['rename_ready']}，垃圾 {result['garbage_ready']}，"
+                    f"新增 {result['new']}，变化 {result['changed']}，未变 {result['unchanged']}"
+                )
             except Exception as error:  # 单个 profile 失败不影响其它 profile
                 message = f"{profile.name}: {type(error).__name__}: {str(error)[:300]}"
                 summary.errors.append(message)
+                self.log(f"── profile {profile.name} 规划失败：{message}")
         summary.finished_at = self.clock()
         return summary
 

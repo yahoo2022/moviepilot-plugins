@@ -97,6 +97,7 @@ class ReadOnlyOpenListClient:
         max_requests: int = 60,
         per_page: int = 1000,
         max_pages_per_directory: int = 20,
+        log: Optional[Callable[[str], None]] = None,
         opener: Optional[Callable[..., Any]] = None,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
@@ -129,6 +130,8 @@ class ReadOnlyOpenListClient:
         self.batch_pause_count = 0
         self.throttle_sleep_seconds = 0.0
         self._last_attempt_at: Optional[float] = None
+        # 日志用注入回调而不是直接 import MoviePilot logger：本模块要保持可脱离 MP 迁移。
+        self._log = log if log is not None else (lambda _message: None)
         self._opener = opener or urllib.request.build_opener(RejectRedirectHandler()).open
         self._sleep = sleep
         self._monotonic = monotonic
@@ -155,6 +158,9 @@ class ReadOnlyOpenListClient:
                 self.batch_pause_max_seconds,
             )
             self.batch_pause_count += 1
+            self._log(
+                f"已请求 {self.request_count}/{self.max_requests} 次，长停 {int(pause)} 秒（防风控）"
+            )
             self._sleep_for(pause)
         target_interval = self._uniform(
             self.min_interval_seconds,

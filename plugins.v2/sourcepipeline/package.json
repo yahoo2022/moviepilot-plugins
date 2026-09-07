@@ -2,7 +2,7 @@
   "id": "SourcePipeline",
   "name": "115 源流水线",
   "description": "只读读取 115 原生目录建 SQLite 缓存，并在缓存上产出垃圾清单与改名预演报告；代码级无任何写入能力",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": "yahoo2022",
   "author_url": "https://github.com/yahoo2022",
   "icon": "workflow.png",

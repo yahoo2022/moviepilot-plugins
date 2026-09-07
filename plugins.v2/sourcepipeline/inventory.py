@@ -88,6 +88,17 @@ def _as_non_negative_int(value: object) -> int:
         return 0
 
 
+def _relative_to_root(path: str, root: str) -> str:
+    """日志里只显示相对根的部分，避免每行都刷一长串绝对路径。"""
+
+    normalized_root = str(root or "").rstrip("/")
+    if path == normalized_root:
+        return "/（根）"
+    if normalized_root and path.startswith(f"{normalized_root}/"):
+        return path[len(normalized_root):]
+    return path
+
+
 def _hours_before(timestamp: str, hours: int) -> str:
     current = datetime.fromisoformat(timestamp)
     if current.tzinfo is None:
@@ -136,6 +147,7 @@ class InventoryService:
         root_refresh_hours: int = 24,
         directory_refresh_hours: int = 168,
         clock: Callable[[], str] = utc_now,
+        log: Callable[[str], None] | None = None,
     ):
         self.database = database
         self.profiles = [normalize_profile(profile) for profile in profiles if profile.enabled]
@@ -143,6 +155,8 @@ class InventoryService:
         self.root_refresh_hours = max(1, int(root_refresh_hours))
         self.directory_refresh_hours = max(1, int(directory_refresh_hours))
         self.clock = clock
+        # 日志用注入回调而不是直接 import MoviePilot logger：本模块要保持可脱离 MP 迁移。
+        self.log = log if log is not None else (lambda _message: None)
 
     def run(self, mode: str = "cache", *, confirmation: str = "") -> InventoryRunSummary:
         mode = str(mode).casefold()
@@ -191,6 +205,11 @@ class InventoryService:
         try:
             client = self.client_factory(profile)
             summary.request_budget = client.max_requests
+            self.log(
+                f"── profile {profile.name}({profile.logic}) 开始 {mode}："
+                f"预算 {client.max_requests} 请求，待扫 "
+                f"{self.database.queue_remaining(profile.name, profile.root)}，根 {profile.root}"
+            )
             while client.remaining_requests > 0:
                 directory = self.database.next_directory(
                     profile.name,
@@ -223,8 +242,17 @@ class InventoryService:
                     )
                     summary.directories_completed += 1
                     summary.objects_seen += len(objects)
+                    self.log(
+                        f"[{profile.name} {summary.directories_attempted}] "
+                        f"{_relative_to_root(directory, profile.root)} → "
+                        f"子目录 {sum(1 for item in objects if item.is_dir)}，"
+                        f"对象 {len(objects)}，"
+                        f"请求 {client.request_count}/{client.max_requests}，"
+                        f"待扫 {self.database.queue_remaining(profile.name, profile.root)}"
+                    )
                 except Exception as error:
                     message = f"{directory}: {str(error)[:500]}"
+                    self.log(f"[{profile.name}] 目录未完成，保留旧 generation：{message}")
                     self.database.mark_directory_partial(
                         profile.name,
                         directory,
@@ -277,6 +305,16 @@ class InventoryService:
                     summary.stop_reason = "request_budget"
                 else:
                     summary.stop_reason = "batch_complete"
+            self.log(
+                f"── profile {profile.name} 结束："
+                f"目录 {summary.directories_completed}/{summary.directories_attempted}，"
+                f"对象 {summary.objects_seen}，"
+                f"请求 {summary.requests}/{summary.request_budget}，"
+                f"长停 {summary.batch_pauses} 次，节流 {summary.throttle_sleep_seconds} 秒，"
+                f"待扫 {summary.queue_remaining}，"
+                f"{'已收敛' if summary.converged else '未收敛'}，"
+                f"停止原因 {summary.stop_reason}"
+            )
             self.database.finish_run(
                 run_id,
                 profile.name,
